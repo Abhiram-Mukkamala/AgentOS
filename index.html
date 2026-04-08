@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AgentOS | Productivity Hub</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-app: #212121;
+            --bg-sidebar: #171717;
+            --text-main: #ECECEC;
+            --text-muted: #9B9B9B;
+            --border-color: #333333;
+            --accent: #FFFFFF;
+            --accent-text: #000000;
+            --msg-user: #2F2F2F;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', sans-serif; }
+        body { background-color: var(--bg-app); color: var(--text-main); display: flex; height: 100vh; overflow: hidden; font-size: 15px; line-height: 1.6; }
+
+        /* Sleek Sidebar */
+        .sidebar { width: 280px; min-width: 280px; background-color: var(--bg-sidebar); border-right: 1px solid var(--border-color); display: flex; flex-direction: column; transition: margin-left 0.3s ease-in-out; }
+        .sidebar-hidden { margin-left: -280px; } /* Smoothly slides it off screen */
+        .sidebar-header { padding: 20px 24px; font-size: 13px; font-weight: 600; color: var(--text-muted); letter-spacing: 0.5px; border-bottom: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center; }
+        .pulse-dot { width: 8px; height: 8px; background-color: #10b981; border-radius: 50%; box-shadow: 0 0 8px #10b981; animation: pulse 2s infinite; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1;}}
+
+        /* Task Cards */
+        #task-list { padding: 16px; overflow-y: auto; flex-grow: 1; display: flex; flex-direction: column; gap: 8px; }
+        .task-card { background: transparent; padding: 12px 16px; border-radius: 8px; font-size: 14px; border: 1px solid var(--border-color); transition: background 0.2s; }
+        .task-card:hover { background: var(--msg-user); }
+        .task-status { font-size: 11px; color: var(--text-muted); display: block; margin-top: 4px; }
+
+        /* Centered Main Layout */
+        .main-area { flex-grow: 1; display: flex; flex-direction: column; position: relative; align-items: center; overflow: hidden; }
+
+        /* 3 Stripes Button - Now positioned in the main area */
+        #toggle-btn { position: absolute; top: 20px; left: 24px; z-index: 1000; background: transparent; color: var(--text-muted); border: none; font-size: 24px; cursor: pointer; transition: 0.2s; }
+        #toggle-btn:hover { color: var(--text-main); transform: scale(1.1); }
+
+        #chat-container { width: 100%; max-width: 800px; flex-grow: 1; overflow-y: auto; padding: 60px 24px 140px 24px; display: flex; flex-direction: column; gap: 32px; scroll-behavior: smooth; }
+
+        /* Message Styling */
+        .message-row { display: flex; width: 100%; }
+        .user-row { justify-content: flex-end; }
+        .ai-row { justify-content: flex-start; }
+
+        .message { max-width: 85%; padding: 12px 18px; border-radius: 16px; word-wrap: break-word; }
+        .user-msg { background-color: var(--msg-user); color: var(--text-main); border-bottom-right-radius: 4px; }
+        .ai-msg { background-color: transparent; color: var(--text-main); padding: 0; }
+
+        /* Agent Trace Box  */
+        .agent-trace { font-family: monospace; font-size: 13px; color: var(--text-muted); background: var(--bg-sidebar); border: 1px solid var(--border-color); border-radius: 8px; padding: 16px; margin-bottom: 16px; border-left: 3px solid var(--text-muted); }
+        .trace-line { margin-bottom: 4px; }
+        .trace-thinking { color: #8b5cf6; }
+        .trace-action { color: #3b82f6; }
+
+        /* Floating Input Bar */
+        .input-wrapper { position: absolute; bottom: 0; width: 100%; max-width: 800px; padding: 24px; background: linear-gradient(transparent, var(--bg-app) 20%); display: flex; flex-direction: column; align-items: center; }
+        .input-box { width: 100%; display: flex; gap: 12px; background-color: var(--msg-user); padding: 8px 8px 8px 16px; border-radius: 24px; border: 1px solid var(--border-color); align-items: center; box-shadow: 0 4px 24px rgba(0,0,0,0.2); }
+        .input-box:focus-within { border-color: #555; }
+        input { flex-grow: 1; background: transparent; border: none; color: var(--text-main); font-size: 15px; outline: none; }
+        button.send-action { background-color: var(--accent); color: var(--accent-text); border: none; width: 36px; height: 36px; border-radius: 50%; display: flex; justify-content: center; align-items: center; cursor: pointer; transition: 0.2s; font-weight: bold; }
+        button.send-action:hover { opacity: 0.8; transform: scale(1.05); }
+        button.send-action:disabled { background-color: var(--border-color); cursor: not-allowed; transform: none; }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 3px; }
+    </style>
+</head>
+<body>
+
+    <div class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            WORKSPACE MEMORY <div class="pulse-dot"></div>
+        </div>
+        <div id="task-list">
+            </div>
+    </div>
+
+    <div class="main-area">
+        <button id="toggle-btn" onclick="toggleSidebar()">☰</button>
+
+        <div id="chat-container">
+            <div class="message-row ai-row">
+                <div class="message ai-msg">
+                    <strong>AgentOS Core</strong><br><br>
+                    Hey! I'm AgentOS, your daily driver personal productivity assistant. How can I help you crush your goals today?
+                </div>
+            </div>
+        </div>
+
+        <div class="input-wrapper">
+            <div class="input-box">
+                <input type="text" id="prompt-input" placeholder="Ask the multi-agent network to do something..." onkeypress="handleEnter(event)">
+                <button onclick="sendMessage()" id="send-btn" class="send-action">↑</button>
+            </div>
+
+            <div style="margin-top: 12px; display: flex; gap: 12px; justify-content: center;">
+                <button onclick="document.getElementById('prompt-input').value='reset'; sendMessage();" style="background: transparent; color: #6b7280; padding: 4px 12px; border-radius: 6px; border: 1px solid #374151; font-size: 12px; cursor: pointer; transition: 0.2s;">Hard Reset</button>
+                <button onclick="document.getElementById('prompt-input').value='undo'; sendMessage();" style="background: transparent; color: #6b7280; padding: 4px 12px; border-radius: 6px; border: 1px solid #374151; font-size: 12px; cursor: pointer; transition: 0.2s;">Undo Last</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+
+        const CLOUD_RUN_URL = "https://multi-agent-hackathon-359624919147.us-central1.run.app";
+
+        async function loadTasks() {
+            try {
+                const response = await fetch(`${CLOUD_RUN_URL}/demo/tasks`);
+                const data = await response.json();
+                const taskList = document.getElementById("task-list");
+
+                if(data.tasks.length === 0) {
+                    taskList.innerHTML = `<div style="color: var(--text-muted); font-size: 13px; text-align: center; margin-top: 20px;">No active tasks.</div>`;
+                    return;
+                }
+
+                taskList.innerHTML = "";
+                data.tasks.forEach(task => {
+                    taskList.innerHTML += `
+                        <div class="task-card">
+                            ${task.description}
+                            <span class="task-status">${task.status.toUpperCase()}</span>
+                        </div>
+                    `;
+                });
+            } catch (error) {
+                console.log("Waiting for backend connection...");
+            }
+        }
+
+        async function sendMessage() {
+            const inputField = document.getElementById("prompt-input");
+            const prompt = inputField.value.trim();
+            if (!prompt) return;
+
+            const chatHistory = document.getElementById("chat-container");
+            const sendBtn = document.getElementById("send-btn");
+
+            // User Command Renderer
+            if (prompt.toLowerCase() !== 'reset' && prompt.toLowerCase() !== 'undo') {
+                chatHistory.innerHTML += `
+                    <div class="message-row user-row">
+                        <div class="message user-msg">${prompt}</div>
+                    </div>`;
+            }
+            inputField.value = "";
+
+            // 2. Render "Thinking" Trace
+            const traceId = "trace-" + Date.now();
+            chatHistory.innerHTML += `
+                <div class="message-row ai-row" id="${traceId}">
+                    <div class="message ai-msg" style="width: 100%;">
+                        <div class="agent-trace">
+                            <div class="trace-line trace-thinking">> Supervisor: Analyzing intent and delegating...</div>
+                            <div class="trace-line trace-action">> Network: Executing tool chain...</div>
+                            <div class="trace-line" style="margin-top: 8px; animation: pulse 1.5s infinite;">Processing...</div>
+                        </div>
+                    </div>
+                </div>`;
+
+            window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+            chatHistory.scrollTop = chatHistory.scrollHeight;
+            sendBtn.disabled = true;
+
+            try {
+                // 3. API Call
+                const response = await fetch(`${CLOUD_RUN_URL}/chat`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ prompt: prompt })
+                });
+                const data = await response.json();
+
+                // 4. Remove Trace and Render AI Response
+                document.getElementById(traceId).remove();
+                chatHistory.innerHTML += `
+                    <div class="message-row ai-row">
+                        <div class="message ai-msg">${data.response}</div>
+                    </div>`;
+
+                loadTasks(); // Sidebar Updater
+            } catch (error) {
+                document.getElementById(traceId).remove();
+                chatHistory.innerHTML += `
+                    <div class="message-row ai-row">
+                        <div class="message ai-msg" style="color: #ef4444;">Connection error. Ensure your Cloud Run backend is live and CORS is configured.</div>
+                    </div>`;
+            }
+
+            sendBtn.disabled = false;
+            chatHistory.scrollTop = chatHistory.scrollHeight;
+        }
+
+        function handleEnter(event) {
+            if (event.key === "Enter") sendMessage();
+        }
+
+        // Initial load and polling
+        loadTasks();
+        setInterval(loadTasks, 5000);
+
+        // Toggle Sidebar
+        function toggleSidebar() {
+            const sidebar = document.getElementById('sidebar');
+            if (sidebar) {
+                sidebar.classList.toggle('sidebar-hidden');
+            }
+        }
+    </script>
+</body>
+</html>
