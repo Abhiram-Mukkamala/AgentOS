@@ -2,7 +2,7 @@ import wikipedia
 from typing import Optional
 from langchain_core.tools import tool
 from langchain_experimental.utilities import PythonREPL
-from database import AsyncSessionLocal, Task
+from database import AsyncSessionLocal, Task, engine, Base
 
 repl = PythonREPL()
 
@@ -17,6 +17,8 @@ def python_execution_tool(code: str) -> str:
 
 
 async def _async_db_add(description: str, due_date: Optional[str]):
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
     async with AsyncSessionLocal() as db:
         try:
             new_task = Task(description=description, due_date=due_date)

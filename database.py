@@ -12,9 +12,6 @@ if DATABASE_URL and DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
 
 engine = create_async_engine(DATABASE_URL, poolclass=NullPool)
-AsyncSessionLocal = async_sessionmaker(bind=engine, class_=AsyncSession)
-
-engine = create_async_engine(DATABASE_URL, poolclass=NullPool)
 AsyncSessionLocal = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
 

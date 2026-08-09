@@ -1,48 +1,115 @@
-# 🧠 AgentOS: Contextual Multi-Agent Productivity Hub
+# 🧠 AgentOS: LangGraph Multi-Agent Assistant
 
 ![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110.0-009688.svg)
 ![LangGraph](https://img.shields.io/badge/LangGraph-Multi--Agent-orange.svg)
-![Database](https://img.shields.io/badge/Supabase-asyncpg-4CAF50.svg)
-![LLM](https://img.shields.io/badge/Gemini-1.5_Flash-8b5cf6.svg)
+![Gemini](https://img.shields.io/badge/Gemini-2.0_Flash-8b5cf6.svg)
 
-AgentOS is a stateful, multi-agent orchestrator designed to eliminate the "Parrot Effect" in AI assistants. Instead of returning raw data dumps, specialized agents execute tools and perform a **Synthesis Pass** to provide actionable, context-aware insights.
+AgentOS is a stateful multi-agent system built with FastAPI and LangGraph. It routes user requests from a central Supervisor agent to specialized sub-agents that execute tools for Python execution, Wikipedia research, and task database storage.
 
-Built specifically for AI developers managing complex, multi-year AIML roadmaps and high-powered home lab environments.
-
-## 🏗️ Architecture Flow
+## 🏗️ Architecture & How It Works
 
 ```mermaid
 flowchart LR
-    User([User Client]) -->|JSON Payload| API[FastAPI Gateway]
+    User([User / Browser]) -->|HTTP / JSON| API[FastAPI Gateway]
 
-    subgraph Core_Engine [AgentOS Backend - LangGraph]
-        direction TB
-        API -->|Thread ID| Supervisor{Generalist Supervisor}
+    subgraph Core [LangGraph Core]
+        API -->|Prompt & Thread ID| Supervisor{Generalist Supervisor}
+        Supervisor -->|Route: Code| Codex[CodexEngine]
+        Supervisor -->|Route: Research| Research[ResearchAgent]
+        Supervisor -->|Route: Database| DBAgent[DBAgent]
 
-        Supervisor -->|Route: Logic| Codex[Codex Engine]
-        Supervisor -->|Route: Data| Research[Research Agent]
-        Supervisor -->|Route: State| DBAgent[DB Agent]
-
-        Codex -.-> Synthesis[Anti-Parrot Synthesis Loop]
-        Research -.-> Synthesis
-        DBAgent -.-> Synthesis
-
-        Synthesis -.->|Conversational Output| Supervisor
+        Codex -.->|Tool Output| Supervisor
+        Research -.->|Tool Output| Supervisor
+        DBAgent -.->|Tool Output| Supervisor
     end
 
-    subgraph External_Services [External Infrastructure]
-        direction TB
-        Codex -->|Execute| REPL[Python REPL]
-        Research -->|Fetch| Wiki[Wikipedia API]
-        DBAgent -->|asyncpg| DB[(Supabase PostgreSQL)]
+    subgraph Tools [Tools & Infrastructure]
+        Codex --> REPL[Python REPL]
+        Research --> Wiki[Wikipedia API]
+        DBAgent --> DB[(SQLAlchemy Database)]
     end
 
-    Supervisor ===|Reasoning| Gemini((Gemini 1.5 Flash))
-    Synthesis ===|Formatting| Gemini
+    Supervisor ===|LLM| Gemini((Gemini 2.0 Flash))
+```
 
-    style Supervisor fill:#d97706,stroke:#b45309,color:#fff
-    style Synthesis fill:#059669,stroke:#047857,color:#fff
-    style Gemini fill:#2563eb,stroke:#1d4ed8,color:#fff
-    style Core_Engine fill:#1e293b,stroke:#475569,color:#e2e8f0
-    style DB fill:#0f766e,stroke:#115e59,color:#fff
+### Agents & Tools Currently Implemented
+
+- **Generalist Supervisor**: Analyzes incoming messages and routes requests to the appropriate specialist (`CodexEngine`, `ResearchAgent`, `DBAgent`) or produces final responses (`FINISH`).
+- **CodexEngine**: Uses `python_execution_tool` (LangChain PythonREPL) to run Python code for math and logic validation.
+- **ResearchAgent**: Uses `research_tool` (Wikipedia API) to fetch documentation and summary snippets.
+- **DBAgent**: Uses `add_database_task` to insert tasks (description, status, due date) into PostgreSQL or SQLite databases via SQLAlchemy async sessions.
+
+---
+
+## 🛠️ Installation & Running
+
+### Prerequisites
+
+- Python 3.11+
+- Google Gemini API key (`GEMINI_API_KEY`)
+
+### Quickstart (Local)
+
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/Abhiram-Mukkamala/AgentOS.git
+   cd AgentOS
+   ```
+
+2. **Install dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Set environment variables**:
+   ```bash
+   export GEMINI_API_KEY="your-gemini-api-key"
+   # Optional: default database is local SQLite (sqlite+aiosqlite:///./local_dev.db)
+   # export DATABASE_URL="postgresql://user:password@host:port/dbname"
+   ```
+
+4. **Run the FastAPI server**:
+   ```bash
+   python main.py
+   # or
+   uvicorn main:app --host 0.0.0.0 --port 8080
+   ```
+
+5. **Access the application**:
+   - Web UI: Open `http://localhost:8080` in your browser.
+   - API Endpoint: `POST http://localhost:8080/chat` with JSON body:
+     ```json
+     {
+       "prompt": "Calculate 15 * 87 using python"
+     }
+     ```
+
+### Running with Docker
+
+1. **Build the image**:
+   ```bash
+   docker build -t agentos .
+   ```
+
+2. **Run the container**:
+   ```bash
+   docker run -p 8080:8080 -e GEMINI_API_KEY="your-gemini-api-key" agentos
+   ```
+
+---
+
+## ⚠️ Current Limitations
+
+- **LLM Model**: Configured for `gemini-2.0-flash`. Requires a valid `GEMINI_API_KEY`.
+- **In-Memory Checkpoints**: Conversation state uses `MemorySaver` in-memory checkpointer; state is reset when the server restarts.
+- **REPL Execution Sandbox**: `PythonREPL` runs Python code in the local execution context without isolated container sandboxing.
+- **Fixed Thread ID Default**: The web interface uses generated thread IDs per request session; hard reset (`reset` / `clear`) clears the active thread session.
+
+---
+
+## 🚧 In Progress
+
+- **[In Progress] Frontend Task Sidebar**: The single-page UI contains a task memory sidebar. Backend endpoints (`GET /tasks` or `/demo/tasks`) to list and retrieve saved database tasks for the frontend are currently in progress.
+- **[In Progress] Advanced Checkpoint Persistence**: Replacing in-memory session saving with persistent database checkpointers across server restarts.
+- **[In Progress] Multi-Step Task Management**: Querying, updating, and deleting stored tasks via conversational agent commands.
