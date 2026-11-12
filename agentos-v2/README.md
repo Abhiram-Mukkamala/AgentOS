@@ -17,39 +17,39 @@ AgentOS v2.5 is a stateful, multi-agent developer productivity platform featurin
 
 ```mermaid
 flowchart TB
-    User([Web IDE / VS Code Extension]) -->|HTTP + Bearer JWT| API[FastAPI Gateway]
+    User(["Web IDE / VS Code Extension"]) -->|"HTTP + Bearer JWT"| API["FastAPI Gateway"]
 
-    subgraph Tier0 [Tier-0: Edge Reflex Router]
-        API -->|Prompt + Context| Edge{EdgeRouter}
-        Edge -->|margin >= 0.25 & entropy <= 0.35| SchemaGate[Pydantic Schema Coercion]
-        SchemaGate -->|Single-Hop Safe Tool| FastExec[Direct Tool Dispatch]
+    subgraph Tier0["Tier-0: Edge Reflex Router"]
+        API -->|"Prompt + Context"| Edge{"EdgeRouter"}
+        Edge -->|"margin >= 0.25 & entropy <= 0.35"| SchemaGate["Pydantic Schema Coercion"]
+        SchemaGate -->|"Single-Hop Safe Tool"| FastExec["Direct Tool Dispatch"]
     end
 
-    subgraph Tier1 [Tier-1: ContextArtifact Store & Relational AST Graph]
-        ArtStore[(ContextArtifact Table\nPass-by-Reference Pointers)]
-        ASTGraph[(ASTSymbol + ASTEdge\n2-Hop Recursive CTE)]
-        Compactor[Sliding-Window Semantic Compactor]
+    subgraph Tier1["Tier-1: ContextArtifact Store & Hybrid AST Graph"]
+        ArtStore[("ContextArtifact Table: Pass-by-Reference Pointers")]
+        ASTGraph[("ASTSymbol + ASTEdge: 384-d Vectors & 2-Hop CTE")]
+        Compactor["Sliding-Window Semantic Compactor"]
     end
 
-    subgraph Tier2 [Tier-2: Self-Healing LangGraph Multi-Agent Kernel]
-        Edge -->|Escalate: MULTI_HOP / LOW_MARGIN / HIGH_SPAN_ENTROPY| Supervisor{Senior Supervisor}
-        Supervisor -->|Code, FS & AST| Codex[Codex Agent]
-        Supervisor -->|Web & Docs| Research[Research Agent]
-        Supervisor -->|Snippets & Changelog| DBAgent[DB Agent]
+    subgraph Tier2["Tier-2: Self-Healing LangGraph Multi-Agent Kernel"]
+        Edge -->|"Escalate: MULTI_HOP / LOW_MARGIN / HIGH_SPAN_ENTROPY"| Supervisor{"Senior Supervisor"}
+        Supervisor -->|"Code, FS & AST"| Codex["Codex Agent"]
+        Supervisor -->|"Web & Docs"| Research["Research Agent"]
+        Supervisor -->|"Snippets & Changelog"| DBAgent["DB Agent"]
 
-        Codex --> Dispatcher[_execute_and_record_tools]
+        Codex --> Dispatcher["_execute_and_record_tools"]
         Research --> Dispatcher
         DBAgent --> Dispatcher
 
-        Dispatcher -->|Output > 250 tokens| ArtStore
-        Dispatcher -->|2x Identical or 3x Consecutive Failure| Breaker[Self-Healing Circuit Breaker]
-        Breaker -->|Inject SystemMessage + Blast Radius Directive| ASTGraph
+        Dispatcher -->|"Output > 250 tokens"| ArtStore
+        Dispatcher -->|"2x Identical or 3x Consecutive Failure"| Breaker["Self-Healing Circuit Breaker"]
+        Breaker -->|"Inject SystemMessage + Blast Radius Directive"| ASTGraph
         Dispatcher --> Supervisor
     end
 
-    Codex -.->|write_file / patch_file .py hook| ASTGraph
-    Supervisor -.->|> MEMORY_TOKEN_BUDGET| Compactor
-    Compactor -.->|Checkpoint Pointer| ArtStore
+    Codex -.->|"write_file / patch_file .py hook"| ASTGraph
+    Supervisor -.->|"Tokens > MEMORY_TOKEN_BUDGET"| Compactor
+    Compactor -.->|"Checkpoint Pointer"| ArtStore
 ```
 
 ---

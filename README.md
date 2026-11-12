@@ -4,38 +4,56 @@
 
 ---
 
-## Architecture Overview
+## Architecture & Execution Flow
 
-```text
-┌────────────────────────────────────────────────────────────────────────────┐
-│                   USER REQUEST (Web IDE / VS Code / API)                   │
-└─────────────────────────────────────┬──────────────────────────────────────┘
-                                      │
-                                      ▼
-┌────────────────────────────────────────────────────────────────────────────┐
-│ TIER 0: Pluggable Edge Reflex Router (`edge_router.py` — 0.032 ms p50)     │
-│  • Evaluates confidence margin, token span entropy & Pydantic schemas      │
-│  • Pluggable backends: Rules | Embeddings | ONNX Token Tagger | Micro-LLM  │
-└───────────────────┬─────────────────────────────────────────┬──────────────┘
-                    │                                         │
-     [High Confidence &]                       [Low Margin, High Entropy,]
-     [Atomic 1-Step Op ]                       [or Multi-Hop Workflow    ]
-                    │                                         │
-                    ▼                                         ▼
-┌───────────────────────────────────┐   ┌────────────────────────────────────┐
-│ FAST-PATH TOOL DISPATCH (< 1 ms)  │   │ TIER 1: Structural & Context Layer │
-│  • Direct deterministic execution │   │  • `ast_graph.py`: Hybrid Semantic │
-│  • Live telemetry in /api/metrics │   │    + 2-Hop Recursive SQL CTE       │
-│                                   │   │  • `ContextArtifact`: Pass-by-Ref  │
-└───────────────────────────────────┘   └─────────────────┬──────────────────┘
-                                                          │
-                                                          ▼
-                                        ┌────────────────────────────────────┐
-                                        │ TIER 2: LangGraph Stateful Kernel  │
-                                        │  • Supervisor + Research/Code Agents│
-                                        │  • Self-Healing Circuit Breaker    │
-                                        │  • Local Codex Engine / Cloud LLMs │
-                                        └────────────────────────────────────┘
+```mermaid
+flowchart TB
+    User(["Web IDE / VS Code / API Client"]) -->|"HTTP + Bearer JWT"| API["FastAPI Gateway"]
+
+    subgraph Tier0["Tier 0: Pluggable Edge Reflex Router (0.032 ms p50)"]
+        API -->|"Prompt + Context"| Backend["Pluggable Backend: Rules | Embeddings | ONNX | Micro-LLM"]
+        Backend --> Gate{"Confidence Margin >= 0.25 & Span Entropy <= 0.35?"}
+        Gate -->|"Yes: Atomic 1-Step Op"| Schema["Pydantic Schema Coercion"]
+        Schema -->|"Valid"| FastExec["Direct Tool Dispatch"]
+        FastExec -->|"Response + Telemetry"| Metrics["GET /api/metrics"]
+    end
+
+    subgraph Tier1["Tier 1: Memory Insulation & Hybrid Semantic AST Layer"]
+        ArtStore[("ContextArtifact Table: Offloaded Payloads > 250 Tokens")]
+        Compactor["Sliding-Window Semantic Compactor"]
+        ASTGraph[("ASTSymbol + ASTEdge: 384-d Embeddings & 2-Hop SQL CTE")]
+    end
+
+    subgraph Tier2["Tier 2: Self-Healing LangGraph Stateful Kernel"]
+        Gate -->|"Escalate: Multi-Hop / Low Margin / High Entropy"| Supervisor{"Senior Supervisor"}
+        Schema -->|"Schema Coercion Failed"| Supervisor
+
+        Supervisor -->|"Code, FS & AST"| Codex["Codex Agent"]
+        Supervisor -->|"Web & Docs"| Research["Research Agent"]
+        Supervisor -->|"Snippets & Changelog"| DBAgent["DB Agent"]
+
+        Codex --> Dispatch["Unified Tool Dispatcher"]
+        Research --> Dispatch
+        DBAgent --> Dispatch
+
+        Dispatch -->|"Output > 250 Tokens"| Offload["Persist Full Payload & Inject Compact Ref Pointer"]
+        Offload --> ArtStore
+        Offload --> Supervisor
+
+        Dispatch -->|"Output <= 250 Tokens"| Supervisor
+
+        Dispatch -->|"2x Identical or 3x Consecutive Failure"| Breaker{"Self-Healing Circuit Breaker"}
+        Breaker -->|"Trip & Halt Redundant Loop"| Directive["Inject System Directive: Inspect Blast Radius"]
+        Directive -->|"Semantic Anchor + 2-Hop Trace"| ASTGraph
+        ASTGraph -.->|"Affected Callers Across Files"| Supervisor
+    end
+
+    Codex -.->|"Auto Re-Index on .py Edit"| ASTGraph
+    Codex -.->|"Targeted Read: keys / lines"| ArtStore
+    Supervisor -.->|"History > Token Budget"| Compactor
+    Compactor -.->|"Archive Old Turns as Checkpoint Ref"| ArtStore
+    Supervisor -->|"Synthesized Final Answer"| User
+    Metrics -->|"Live Telemetry"| User
 ```
 
 ---
@@ -178,3 +196,4 @@ AgentOS is built to interoperate cleanly with external edge-AI tools via open in
 ## License
 
 MIT License
+
