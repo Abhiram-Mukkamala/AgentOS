@@ -9,6 +9,7 @@ Architecture:
 
 import asyncio
 import concurrent.futures
+import hashlib
 import json
 import logging
 import math
@@ -20,7 +21,7 @@ import time
 import uuid
 from functools import partial
 from pathlib import Path
-from typing import Annotated, Any, List, Literal, Optional, Sequence, TypedDict
+from typing import Annotated, Any, List, Literal, Optional, Sequence, Tuple, TypedDict
 from urllib.parse import urlparse
 
 import httpx
@@ -48,7 +49,13 @@ try:
 except ImportError:
     ChatOpenAI = None
 
-from memory_manager import load_memory, memory_to_system_message, update_memory
+from memory_manager import (
+    compact_conversation_window,
+    load_memory,
+    memory_to_system_message,
+    store_context_artifact,
+    update_memory,
+)
 from settings_manager import add_user_tokens, estimate_tokens, get_user_settings
 from tools import (
     analyze_code,
@@ -767,10 +774,12 @@ async def get_agent_llm(agent_name: str, config, tools=None, structured_schema=N
 # ── State & Routing Schema ──────────────────────────────────────────────────────
 
 
-class AgentState(TypedDict):
+class AgentState(TypedDict, total=False):
     messages: Annotated[Sequence[BaseMessage], operator.add]
     next: str
     iterations: int  # supervisor routing budget (resets per ainvoke)
+    failure_signatures: List[Tuple[str, str, str]]
+    circuit_breaker_tripped: bool
 
 
 class Route(BaseModel):
@@ -950,6 +959,208 @@ response.  The plan MUST:
 Do NOT call any tools in this response.  Just output the plan in plain text.
 After this, you will proceed to execute the plan step by step."""
 
+ARTIFACT_OFFLOAD_CHAR_THRESHOLD = 1000  # ~250 tokens
+MAX_CONSECUTIVE_TOOL_FAILURES = 3
+
+_TOOL_ARTIFACT_TYPE_MAP = {
+    "web_search": "research_digest",
+    "scrape_page": "research_digest",
+    "search_algorithms": "research_digest",
+    "get_symbol_blast_radius": "ast_slice",
+    "index_codebase_graph": "ast_slice",
+    "index_repo": "ast_slice",
+    "analyze_code": "ast_slice",
+    "patch_file": "patch_diff",
+}
+
+_PRODUCER_DISPLAY_MAP = {
+    "codex": "CodexAgent",
+    "research": "ResearchAgent",
+    "db": "DBAgent",
+}
+
+
+def _is_tool_failure(tool_name: str, output: str) -> bool:
+    """Detect whether a tool execution output represents an error/failure."""
+    text = (output or "").strip()
+    if not text:
+        return False
+    failure_prefixes = (
+        "Execution Error:",
+        "patch_file ERROR:",
+        "Error:",
+        "Error ",
+        "Syntax Error",
+        "Security Error:",
+        "Tool error",
+        "run_tests ERROR:",
+        "Failed to scrape",
+        "Search error:",
+        "Algorithm search error:",
+        "DB Error:",
+    )
+    if text.startswith(failure_prefixes):
+        return True
+    if tool_name in ("execute_code", "patch_file") and (
+        "Traceback (most recent call last):" in text
+        or re.search(r"\b(?:Error|Exception):", text)
+    ):
+        return True
+    return False
+
+
+def _extract_failing_symbol_hint(tool_calls: list[dict], error_text: str) -> str:
+    """Best-effort extraction of a symbol or file identifier for blast-radius diagnosis."""
+    m = re.search(r"in (\w+)\b", error_text)
+    if m and m.group(1) not in {"the", "file", "line", "module"}:
+        return m.group(1)
+    for tc in tool_calls:
+        args = tc.get("args") or {}
+        if isinstance(args, dict):
+            for k in ("symbol_name", "path", "filepath", "code"):
+                val = str(args.get(k, "")).strip()
+                if val:
+                    fn_m = re.search(r"\bdef\s+([a-zA-Z_]\w*)", val)
+                    if fn_m:
+                        return fn_m.group(1)
+                    return val.splitlines()[0][:40]
+    return "target_symbol"
+
+
+async def _execute_and_record_tools(
+    tool_calls: list[dict],
+    state: dict,
+    user_id: int = 1,
+    thread_id: str = "default",
+    session: Any = None,
+    *,
+    config: Optional[RunnableConfig] = None,
+    agent_name: str = "codex",
+    use_memory: bool = False,
+    memory_state: Optional[dict] = None,
+    compressor_llm: Any = None,
+) -> List[BaseMessage]:
+    """
+    Unified tool dispatcher with:
+      1. Automatic Pass-by-Reference `ContextArtifact` offloading for outputs > 250 tokens (> 1000 chars).
+      2. Self-Healing Circuit Breaker tracking `(tool_name, args_hash, stderr_hash)` in `state["failure_signatures"]`.
+      3. Optional persistent Memory Token compression via `update_memory`.
+    """
+    results: List[BaseMessage] = []
+    failure_sigs: List[Tuple[str, str, str]] = list(state.get("failure_signatures") or [])
+    producer_agent = _PRODUCER_DISPLAY_MAP.get(agent_name, "ToolRunner")
+
+    eff_config = config or RunnableConfig(
+        configurable={"user_id": user_id, "thread_id": thread_id}
+    )
+
+    for idx, tc in enumerate(tool_calls):
+        tool_name = tc.get("name", "")
+        tool_args = tc.get("args") or {}
+        tool_id = tc.get("id") or f"call_{idx}_{uuid.uuid4().hex[:8]}"
+
+        tool_fn = _ALL_TOOLS.get(tool_name)
+        if tool_fn is None:
+            result_content = f"Error: Unknown tool '{tool_name}'"
+        else:
+            try:
+                if hasattr(tool_fn, "ainvoke"):
+                    result_content = str(await tool_fn.ainvoke(tool_args, config=eff_config))
+                elif callable(tool_fn):
+                    maybe_coro = tool_fn(**tool_args)
+                    result_content = str(await maybe_coro if asyncio.iscoroutine(maybe_coro) else maybe_coro)
+                else:
+                    result_content = f"Error: Tool '{tool_name}' is not callable"
+            except Exception as e:
+                result_content = f"Execution Error: Tool error in '{tool_name}': {repr(e)}"
+
+        # ── Self-Healing Circuit Breaker Evaluation ──────────────────────────
+        failed = _is_tool_failure(tool_name, result_content)
+        tripped = False
+        if failed:
+            args_hash = hashlib.sha256(
+                json.dumps(tool_args, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()[:12]
+            stderr_hash = hashlib.sha256(
+                result_content.strip().encode("utf-8")
+            ).hexdigest()[:12]
+            sig = (tool_name, args_hash, stderr_hash)
+            failure_sigs.append(sig)
+            state["failure_signatures"] = failure_sigs
+
+            # Condition 1: execute_code or patch_file fails twice consecutively with identical (args_hash, stderr_hash)
+            identical_repeat = (
+                tool_name in ("execute_code", "patch_file")
+                and len(failure_sigs) >= 2
+                and failure_sigs[-1] == failure_sigs[-2]
+            )
+            # Condition 2: consecutive failures reach MAX_CONSECUTIVE_TOOL_FAILURES (3)
+            max_exceeded = len(failure_sigs) >= MAX_CONSECUTIVE_TOOL_FAILURES
+
+            if identical_repeat or max_exceeded:
+                tripped = True
+                state["circuit_breaker_tripped"] = True
+        else:
+            failure_sigs = []
+            state["failure_signatures"] = []
+            state["circuit_breaker_tripped"] = False
+
+        # ── Pass-by-Reference Artifact Offloading (> 250 tokens / 1000 chars) ─
+        message_content = result_content
+        if (
+            len(result_content) > ARTIFACT_OFFLOAD_CHAR_THRESHOLD
+            and tool_name != "read_context_artifact"
+        ):
+            artifact_type = _TOOL_ARTIFACT_TYPE_MAP.get(tool_name, "tool_output")
+            art = await store_context_artifact(
+                session=session,
+                user_id=user_id,
+                thread_id=thread_id,
+                producer_agent=producer_agent,
+                artifact_type=artifact_type,
+                payload=result_content,
+            )
+            message_content = (
+                f"[Artifact ref: {art['artifact_id']} | "
+                f"Tokens: {art['token_count']} | "
+                f"Summary: {art['summary']}]"
+            )
+
+        if use_memory and memory_state is not None and compressor_llm is not None:
+            memory_state_updated = await update_memory(
+                current=memory_state,
+                tool_name=tool_name,
+                tool_input=str(tool_args),
+                tool_result=message_content,
+                compressor_llm=compressor_llm,
+            )
+            memory_state.clear()
+            memory_state.update(memory_state_updated)
+
+        results.append(
+            ToolMessage(
+                content=message_content,
+                name=tool_name,
+                tool_call_id=tool_id,
+            )
+        )
+
+        if tripped:
+            symbol_hint = _extract_failing_symbol_hint(tool_calls, result_content)
+            directive = SystemMessage(
+                content=(
+                    f"[CIRCUIT BREAKER TRIPPED] Tool `{tool_name}` failed repeatedly with identical "
+                    f"or consecutive errors (signature={failure_sigs[-1][1]}:{failure_sigs[-1][2]}). "
+                    f"Halt redundant retries immediately. Call `get_symbol_blast_radius('{symbol_hint}')` "
+                    f"to inspect upstream/downstream callers before attempting a different fix, or "
+                    f"escalate cleanly to the user with the root cause."
+                )
+            )
+            results.append(directive)
+            break
+
+    return results
+
 
 async def worker_node(
     state: AgentState,
@@ -960,11 +1171,28 @@ async def worker_node(
     use_memory: bool = False,
 ) -> dict:
     """
-    ReAct (Reason + Act) loop with optional persistent Memory Tokens.
+    ReAct (Reason + Act) loop with Pass-by-Reference Artifact Offloading,
+    Sliding-Window Context Compaction, and Self-Healing Circuit Breaker.
     """
-    conversation = list(state["messages"])
+    configurable = config.get("configurable", {}) if isinstance(config, dict) else getattr(config, "configurable", {}) or {}
+    user_id = int(configurable.get("user_id") or 1)
+    thread_id = str(configurable.get("thread_id") or "default")
+
+    raw_conversation = list(state.get("messages", []))
+    conversation, _ = await compact_conversation_window(
+        raw_conversation,
+        session=None,
+        user_id=user_id,
+        thread_id=thread_id,
+    )
     working: list[BaseMessage] = []
     steps = 0
+
+    mutable_state: dict = {
+        "messages": conversation,
+        "failure_signatures": list(state.get("failure_signatures") or []),
+        "circuit_breaker_tripped": bool(state.get("circuit_breaker_tripped", False)),
+    }
 
     tools = (
         codex_tools
@@ -975,37 +1203,6 @@ async def worker_node(
     agent_llm = await get_agent_llm(agent_name, config, tools=tools)
     routing_llm = await get_agent_llm("routing", config) if use_memory else None
     memory_state = load_memory() if use_memory else None
-
-    async def _execute_tool_calls(tool_calls: list[dict]) -> list[ToolMessage]:
-        nonlocal memory_state
-        results: list[ToolMessage] = []
-        for tc in tool_calls:
-            tool_fn = _ALL_TOOLS.get(tc["name"])
-            if tool_fn is None:
-                result_content = f"Unknown tool: '{tc['name']}'"
-            else:
-                try:
-                    result_content = str(await tool_fn.ainvoke(tc["args"], config=config))
-                except Exception as e:
-                    result_content = f"Tool error in '{tc['name']}': {repr(e)}"
-
-            if use_memory and memory_state is not None and routing_llm is not None:
-                memory_state = await update_memory(
-                    current=memory_state,
-                    tool_name=tc["name"],
-                    tool_input=str(tc["args"]),
-                    tool_result=result_content,
-                    compressor_llm=routing_llm,
-                )
-
-            results.append(
-                ToolMessage(
-                    content=result_content,
-                    name=tc["name"],
-                    tool_call_id=tc["id"],
-                )
-            )
-        return results
 
     # ── PLANNING PASS (Codex only) ──────────────────────────────────────────
     if use_memory:
@@ -1021,7 +1218,19 @@ async def worker_node(
 
         if plan_response.tool_calls:
             steps += 1
-            working.extend(await _execute_tool_calls(plan_response.tool_calls))
+            tool_msgs = await _execute_and_record_tools(
+                plan_response.tool_calls,
+                mutable_state,
+                user_id=user_id,
+                thread_id=thread_id,
+                session=None,
+                config=config,
+                agent_name=agent_name,
+                use_memory=use_memory,
+                memory_state=memory_state,
+                compressor_llm=routing_llm,
+            )
+            working.extend(tool_msgs)
 
     # ── MAIN ReAct LOOP ─────────────────────────────────────────────────────
     while steps < max_steps:
@@ -1037,12 +1246,31 @@ async def worker_node(
         if not response.tool_calls:
             break
 
-        working.extend(await _execute_tool_calls(response.tool_calls))
+        tool_msgs = await _execute_and_record_tools(
+            response.tool_calls,
+            mutable_state,
+            user_id=user_id,
+            thread_id=thread_id,
+            session=None,
+            config=config,
+            agent_name=agent_name,
+            use_memory=use_memory,
+            memory_state=memory_state,
+            compressor_llm=routing_llm,
+        )
+        working.extend(tool_msgs)
+
+        if mutable_state.get("circuit_breaker_tripped"):
+            log.warning("Circuit breaker tripped in %s; halting redundant retries.", agent_name)
 
     if steps >= max_steps and working and getattr(working[-1], "tool_calls", None):
         working.append(AIMessage(content=f"[{max_steps}-step limit reached. Reporting current state.]"))
 
-    return {"messages": working}
+    return {
+        "messages": working,
+        "failure_signatures": mutable_state.get("failure_signatures", []),
+        "circuit_breaker_tripped": mutable_state.get("circuit_breaker_tripped", False),
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════

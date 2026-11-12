@@ -48,7 +48,7 @@ from database import (
     init_db,
     verify_password,
 )
-from memory_manager import save_memory
+from memory_manager import get_memory_insulation_metrics, save_memory
 from settings_manager import estimate_tokens, get_user_settings, update_user_settings
 from tools import execute_code
 
@@ -474,6 +474,7 @@ async def get_metrics(user_id: int = Depends(get_current_user_id)):
             or 0
         )
     settings = await get_user_settings(user_id)
+    insulation = get_memory_insulation_metrics()
     return {
         "snippets_count": int(snippets_count),
         "improvements_count": int(improvements_count),
@@ -482,6 +483,8 @@ async def get_metrics(user_id: int = Depends(get_current_user_id)):
         "token_budget": settings["token_budget"],
         "active_mode": settings["active_mode"],
         "edge_router": edge_router.get_telemetry(),
+        "artifacts_stored": insulation["artifacts_stored"],
+        "tokens_saved_by_artifacts": insulation["tokens_saved"],
     }
 
 

@@ -134,25 +134,25 @@ async def update_memory(
 
 
 def _build_compact_summary(payload: Any, summary: Optional[str] = None, max_tokens: int = 150) -> str:
-    """Ensure the summary is concise and capped at `<= 150` tokens (~600 chars)."""
+    """Ensure the summary is concise and capped at `<= 150` tokens (auto-summaries target ~45 tokens)."""
     max_chars = max_tokens * 4
     if summary and summary.strip():
         clean = " ".join(summary.strip().split())
         return clean[: max_chars - 3] + "..." if len(clean) > max_chars else clean
 
     if isinstance(payload, dict):
-        keys_preview = ", ".join(list(payload.keys())[:8])
+        keys_preview = ", ".join(list(payload.keys())[:6])
         preview_str = json.dumps(payload, ensure_ascii=False)
-        snippet = " ".join(preview_str.split())[:320]
+        snippet = " ".join(preview_str.split())[:140]
         text = f"Keys=[{keys_preview}] | Preview: {snippet}"
     elif isinstance(payload, list):
-        preview_str = json.dumps(payload[:3], ensure_ascii=False)
-        snippet = " ".join(preview_str.split())[:320]
+        preview_str = json.dumps(payload[:2], ensure_ascii=False)
+        snippet = " ".join(preview_str.split())[:140]
         text = f"List[{len(payload)} items] | Preview: {snippet}"
     else:
         raw_str = str(payload).strip()
         lines = [ln.strip() for ln in raw_str.splitlines() if ln.strip()]
-        head = " | ".join(lines[:4])[:360]
+        head = " | ".join(lines[:3])[:140]
         text = f"{len(lines)} lines ({len(raw_str)} chars): {head}"
 
     return text[: max_chars - 3] + "..." if len(text) > max_chars else text
