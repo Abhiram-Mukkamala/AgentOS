@@ -1,29 +1,37 @@
-# Python
+# ── Secrets ──────────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
-*.pyo
 *.pyd
-*.db
-*.sqlite3
 .venv/
 venv/
 env/
+.pytest_cache/
 
-# Environment
-.env
-__pycache__/
-*.pyc
+# ── Databases & runtime state ────────────────────────────────────────────────
+*.db
+*.sqlite3
+pruned_history*.json
+agentos_memory.json
+workspaces/user_*/
+*.gguf
 
-# IDE
+# ── Build / packaging artifacts ──────────────────────────────────────────────
+*.vsix
+.vscode-test-web/
+
+# ── IDE ──────────────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 
-# OS
+# ── OS / Windows junk ────────────────────────────────────────────────────────
+*.lnk
 .DS_Store
 Thumbs.db
 
-# Logs
+# ── Logs ─────────────────────────────────────────────────────────────────────
 *.log
-
-# Local Database
-local_dev.db
