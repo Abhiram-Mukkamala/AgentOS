@@ -30,13 +30,14 @@ import httpx
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 
 from agent import AgentState, graph, prune_messages_to_limit
+from edge_router import edge_router
 from database import (
     AsyncSessionLocal,
     CodeSnippet,
@@ -215,6 +216,7 @@ class RunRequest(BaseModel):
 class ChatResponse(BaseModel):
     response: str
     thread_id: str
+    edge_decision: Optional[dict] = None
 
 
 class RunResponse(BaseModel):
@@ -479,7 +481,15 @@ async def get_metrics(user_id: int = Depends(get_current_user_id)):
         "token_used": settings["token_used"],
         "token_budget": settings["token_budget"],
         "active_mode": settings["active_mode"],
+        "edge_router": edge_router.get_telemetry(),
     }
+
+
+@app.post("/api/edge/route")
+async def preview_edge_route(request: ChatRequest, user_id: int = Depends(get_current_user_id)):
+    """Inspect the Tier-0 EdgeRouteDecision for a prompt without executing tools."""
+    decision = edge_router.route(request.prompt, context={"user_id": user_id, "thread_id": request.thread_id})
+    return decision.to_dict()
 
 
 # ── Routes ──────────────────────────────────────────────────────────────────────
@@ -503,6 +513,31 @@ async def chat(request: ChatRequest, user_id: int = Depends(get_current_user_id)
             "user_id": user_id,
         }
     }
+
+    # Tier-0 Edge Reflex Router check before waking the LangGraph kernel
+    edge_decision, edge_output = await edge_router.route_and_execute(
+        request.prompt,
+        user_id=user_id,
+        thread_id=request.thread_id,
+    )
+    if edge_decision.handled_at_edge and edge_output is not None:
+        await multi_agent_system.aupdate_state(
+            config,
+            {
+                "messages": [
+                    HumanMessage(content=request.prompt),
+                    AIMessage(content=edge_output),
+                ],
+                "next": "Supervisor",
+                "iterations": 0,
+            },
+        )
+        return ChatResponse(
+            response=edge_output,
+            thread_id=request.thread_id,
+            edge_decision=edge_decision.to_dict(),
+        )
+
     initial_state: AgentState = {
         "messages": [HumanMessage(content=request.prompt)],
         "next": "Supervisor",
@@ -528,7 +563,11 @@ async def chat(request: ChatRequest, user_id: int = Depends(get_current_user_id)
         if warning:
             response_text = warning + "\n\n" + response_text
 
-        return ChatResponse(response=response_text, thread_id=request.thread_id)
+        return ChatResponse(
+            response=response_text,
+            thread_id=request.thread_id,
+            edge_decision=edge_decision.to_dict(),
+        )
     except Exception as e:
         err_msg = str(e).lower()
         if "local_context_window_exceeded" in err_msg:

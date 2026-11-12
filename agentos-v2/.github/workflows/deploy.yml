@@ -42,6 +42,7 @@ jobs:
               save_code_snippet, get_snippets, log_improvement,
           )
           from agent import graph, AgentState
+          from edge_router import EdgeRouteDecision, EdgeRouter, edge_router
           import main
           print('All imports OK')
           "
@@ -61,7 +62,7 @@ jobs:
       - name: Run integration test suite
         env:
           DATABASE_URL: sqlite+aiosqlite:///./test.db
-        run: pytest -q test_auth_settings.py
+        run: pytest -q test_auth_settings.py test_edge_router.py
 
   # ── 2. Docker build check ───────────────────────────────────────────────────
   docker:
