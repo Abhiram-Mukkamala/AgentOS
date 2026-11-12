@@ -41,8 +41,9 @@ jobs:
               web_search, scrape_page, search_algorithms,
               save_code_snippet, get_snippets, log_improvement,
               read_context_artifact, index_codebase_graph, get_symbol_blast_radius,
+              locate_and_trace_blast_radius,
           )
-          from ast_graph import ASTGraphIndexer, query_blast_radius
+          from ast_graph import ASTGraphIndexer, query_blast_radius, embed_symbol_passages, semantic_blast_radius_query
           from memory_manager import store_context_artifact, fetch_context_artifact, compact_conversation_window
           from agent import graph, AgentState
           from edge_router import EdgeRouteDecision, EdgeRouter, edge_router

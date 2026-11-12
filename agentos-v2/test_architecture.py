@@ -25,8 +25,8 @@ import database
 import memory_manager
 import tools as agentos_tools
 from agent import _execute_and_record_tools
-from ast_graph import ASTGraphIndexer, query_blast_radius
-from database import Base, User
+from ast_graph import ASTGraphIndexer, query_blast_radius, semantic_blast_radius_query
+from database import ASTSymbol, Base, User
 from memory_manager import (
     compact_conversation_window,
     fetch_context_artifact,
@@ -359,8 +359,127 @@ def test_self_healing_circuit_breaker():
     asyncio.run(_run_circuit_breaker_tests())
 
 
+async def _run_hybrid_semantic_blast_radius_tests():
+    engine, session_factory = await _create_isolated_session_factory()
+    orig_db_factory = database.AsyncSessionLocal
+    orig_tools_factory = agentos_tools.AsyncSessionLocal
+    orig_ast_factory = ast_graph.AsyncSessionLocal
+    database.AsyncSessionLocal = session_factory
+    agentos_tools.AsyncSessionLocal = session_factory
+    ast_graph.AsyncSessionLocal = session_factory
+
+    try:
+        async with session_factory() as session:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+
+                # Cryptic function name `chk_sig` with rich docstring — zero function-name overlap with query
+                (root / "crypto_core.py").write_text(
+                    "def chk_sig(raw_jwt: str, pub_key: str) -> bool:\n"
+                    '    """Validate cryptographic user bearer token expiration timestamp and signature."""\n'
+                    "    return len(raw_jwt) > 8 and pub_key.startswith('pk_')\n\n"
+                    "def fmt_ccy(cents: int) -> str:\n"
+                    '    """Format integer minor currency units into localized dollar string."""\n'
+                    "    return f'${cents / 100:.2f}'\n",
+                    encoding="utf-8",
+                )
+
+                # Hop-1 callers importing `chk_sig`
+                (root / "auth_service.py").write_text(
+                    "from crypto_core import chk_sig\n\n"
+                    "class SessionGuard:\n"
+                    "    def authenticate_request(self, bearer_str: str) -> bool:\n"
+                    '        """Check incoming HTTP session request credentials."""\n'
+                    "        return chk_sig(bearer_str, 'pk_live_01')\n\n"
+                    "def validate_api_webhook(body: str, sig_hdr: str) -> bool:\n"
+                    '    """Verify webhook callback payload authenticity."""\n'
+                    "    return chk_sig(body, sig_hdr)\n",
+                    encoding="utf-8",
+                )
+
+                # Hop-2 callers across files
+                (root / "gateway_routes.py").write_text(
+                    "from auth_service import SessionGuard, validate_api_webhook\n\n"
+                    "def handle_protected_route(req_token: str) -> str:\n"
+                    '    """HTTP route handler for authenticated dashboard endpoints."""\n'
+                    "    guard = SessionGuard()\n"
+                    "    if guard.authenticate_request(req_token):\n"
+                    "        return '200 OK'\n"
+                    "    return '401 Unauthorized'\n\n"
+                    "def handle_webhook_post(payload: str, sig: str) -> str:\n"
+                    '    """HTTP POST endpoint for external webhook deliveries."""\n'
+                    "    if validate_api_webhook(payload, sig):\n"
+                    "        return 'ACK'\n"
+                    "    return 'NACK'\n",
+                    encoding="utf-8",
+                )
+
+                indexer = ASTGraphIndexer()
+                stats = await indexer.index_workspace(session, user_id=1, workspace_root=root)
+                assert stats["files_indexed"] == 3
+                assert stats["symbols_indexed"] >= 6
+
+                # Verify that ASTSymbol rows store both docstring and 384-d float32 embedding_blob (1536 bytes)
+                from sqlalchemy import select
+                sym_row = (
+                    await session.execute(
+                        select(ASTSymbol).where(ASTSymbol.qualified_name == "crypto_core.chk_sig")
+                    )
+                ).scalar_one()
+                assert "cryptographic user bearer token expiration" in (sym_row.docstring or "")
+                assert sym_row.embedding_blob is not None
+                assert len(sym_row.embedding_blob) == 384 * 4
+
+                # Natural-language query with ZERO exact function-name overlap with `chk_sig`
+                nl_query = "validate cryptographic user bearer token expiration"
+                hybrid_res = await semantic_blast_radius_query(
+                    session=session,
+                    user_id=1,
+                    natural_query=nl_query,
+                    top_k_anchors=2,
+                    max_hops=2,
+                    min_similarity=0.25,
+                )
+
+                anchors = hybrid_res["anchors"]
+                assert len(anchors) >= 1
+                assert anchors[0]["qualified_name"] == "crypto_core.chk_sig"
+                assert anchors[0]["similarity"] >= 0.25
+
+                callers_by_qual = {c["qualified_name"]: c for c in hybrid_res["blast_radius"]}
+                # Hop-1 callers
+                assert "auth_service.SessionGuard.authenticate_request" in callers_by_qual
+                assert callers_by_qual["auth_service.SessionGuard.authenticate_request"]["hop_depth"] == 1
+                assert "auth_service.validate_api_webhook" in callers_by_qual
+                assert callers_by_qual["auth_service.validate_api_webhook"]["hop_depth"] == 1
+                # Hop-2 callers
+                assert "gateway_routes.handle_protected_route" in callers_by_qual
+                assert callers_by_qual["gateway_routes.handle_protected_route"]["hop_depth"] == 2
+                assert "gateway_routes.handle_webhook_post" in callers_by_qual
+                assert callers_by_qual["gateway_routes.handle_webhook_post"]["hop_depth"] == 2
+
+                # Also test the exposed @tool `locate_and_trace_blast_radius`
+                tool_out = await agentos_tools.locate_and_trace_blast_radius.ainvoke(
+                    {"natural_query": nl_query, "top_k_anchors": 2, "hops": 2},
+                    config={"configurable": {"user_id": 1, "thread_id": "thread-sem-1"}},
+                )
+                assert "crypto_core.chk_sig" in tool_out
+                assert "gateway_routes.handle_protected_route" in tool_out
+                assert "gateway_routes.handle_webhook_post" in tool_out
+    finally:
+        database.AsyncSessionLocal = orig_db_factory
+        agentos_tools.AsyncSessionLocal = orig_tools_factory
+        ast_graph.AsyncSessionLocal = orig_ast_factory
+        await engine.dispose()
+
+
+def test_hybrid_semantic_blast_radius():
+    asyncio.run(_run_hybrid_semantic_blast_radius_tests())
+
+
 if __name__ == "__main__":
     test_context_artifact_offloading_and_compaction()
     test_relational_ast_graph_and_2hop_blast_radius()
     test_self_healing_circuit_breaker()
+    test_hybrid_semantic_blast_radius()
     print("ALL_ARCHITECTURE_TESTS_PASSED")

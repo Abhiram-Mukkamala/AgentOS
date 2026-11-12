@@ -1,6 +1,6 @@
 {
   "benchmark_suite": "AgentOS v2.5 Hybrid Edge-to-Kernel Architecture",
-  "timestamp_utc": "2026-11-12T19:23:54.177579+00:00",
+  "timestamp_utc": "2026-11-12T20:12:24.713946+00:00",
   "tier0_edge_router": {
     "total_prompts": 30,
     "single_hop_prompts": 18,
@@ -10,9 +10,9 @@
     "offload_rate_pct": 60.0,
     "single_hop_capture_rate_pct": 100.0,
     "routing_accuracy_pct": 100.0,
-    "p50_latency_ms": 0.026,
-    "p90_latency_ms": 0.184,
-    "edge_p50_latency_ms": 0.031,
+    "p50_latency_ms": 0.032,
+    "p90_latency_ms": 0.199,
+    "edge_p50_latency_ms": 0.044,
     "simulated_kernel_llm_p50_ms": 1850.0
   },
   "pass_by_reference_memory": {
@@ -28,11 +28,11 @@
     "files_in_fixture": 5,
     "symbols_indexed": 9,
     "edges_indexed": 6,
-    "initial_index_ms": 37.76,
+    "initial_index_ms": 39.84,
     "ast_graph": {
       "recall_at_2_hops_pct": 100.0,
       "false_positive_rate_pct": 0.0,
-      "median_query_latency_ms": 1.028,
+      "median_query_latency_ms": 0.75,
       "callers_identified": [
         "checkout_api.post_checkout_endpoint",
         "checkout_api.post_refund_endpoint",
@@ -43,12 +43,28 @@
     "flat_text_grep": {
       "recall_at_2_hops_pct": 0.0,
       "false_positive_rate_pct": 100.0,
-      "median_query_latency_ms": 0.528,
+      "median_query_latency_ms": 0.463,
       "matches_returned": [
         "audit_docs.<module>",
         "audit_docs.get_compliance_banner",
         "payment_processor.<module>"
       ]
+    }
+  },
+  "hybrid_semantic_blast_radius": {
+    "queries_evaluated": 10,
+    "total_expected_callers": 20,
+    "hybrid_semantic_ast": {
+      "anchor_top1_recall_pct": 100.0,
+      "anchor_hits": 10,
+      "transitive_2hop_caller_recall_pct": 100.0,
+      "caller_hits": 20,
+      "p50_latency_ms": 2.779
+    },
+    "flat_vector_baseline": {
+      "anchor_top1_recall_pct": 100.0,
+      "transitive_2hop_caller_recall_pct": 0.0,
+      "caller_hits": 0
     }
   }
 }

@@ -65,6 +65,7 @@ from tools import (
     index_codebase_graph,
     index_repo,
     list_directory,
+    locate_and_trace_blast_radius,
     log_improvement,
     patch_file,
     read_context_artifact,
@@ -938,6 +939,7 @@ codex_tools = [
     index_repo,
     index_codebase_graph,
     get_symbol_blast_radius,
+    locate_and_trace_blast_radius,
     read_context_artifact,
 ]
 research_tools = [web_search, scrape_page, search_algorithms, read_context_artifact]
@@ -967,6 +969,7 @@ _TOOL_ARTIFACT_TYPE_MAP = {
     "scrape_page": "research_digest",
     "search_algorithms": "research_digest",
     "get_symbol_blast_radius": "ast_slice",
+    "locate_and_trace_blast_radius": "ast_slice",
     "index_codebase_graph": "ast_slice",
     "index_repo": "ast_slice",
     "analyze_code": "ast_slice",

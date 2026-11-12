@@ -30,7 +30,7 @@ try:
 except ImportError:
     DDGS = None
 
-from ast_graph import ast_graph_indexer, query_blast_radius
+from ast_graph import ast_graph_indexer, query_blast_radius, semantic_blast_radius_query
 from database import AsyncSessionLocal, CodeSnippet, Improvement, get_or_create_local_dev_user
 from memory_manager import fetch_context_artifact
 
@@ -829,4 +829,61 @@ async def get_symbol_blast_radius(
         return "\n".join(lines)
     except Exception as e:
         return f"Error querying blast radius: {repr(e)}"
+
+
+@tool
+async def locate_and_trace_blast_radius(
+    natural_query: str,
+    top_k_anchors: int = 3,
+    hops: int = 2,
+    config: Optional[RunnableConfig] = None,
+) -> str:
+    """Two-stage hybrid semantic + structural search over the AST codebase graph.
+    Stage 1 discovers the top-K semantic anchor symbols matching `natural_query`
+    (even when the exact function/class name is unknown).
+    Stage 2 expands each anchor's N-hop transitive blast radius across files."""
+    try:
+        user_id = await _get_user_id(config)
+        result = await semantic_blast_radius_query(
+            session=None,
+            user_id=user_id,
+            natural_query=natural_query,
+            top_k_anchors=top_k_anchors,
+            max_hops=hops,
+        )
+        anchors = result.get("anchors") or []
+        if not anchors:
+            return f"No semantic anchor symbols found for query: '{natural_query}'."
+
+        lines = [
+            f"Hybrid Semantic + {hops}-Hop Blast Radius for '{natural_query}':",
+            "═" * 68,
+            f"Stage 1 — Semantic Anchors ({len(anchors)} matched):",
+        ]
+        for idx, anc in enumerate(anchors, start=1):
+            doc_snip = (anc.get("docstring") or "").splitlines()[0][:90] if anc.get("docstring") else ""
+            lines.append(
+                f"  {idx}. {anc['qualified_name']} ({anc['symbol_kind']}) "
+                f"in {anc['file_path']}:{anc['start_line']}-{anc['end_line']} "
+                f"[sim={anc['similarity']:.3f}]"
+                + (f" — {doc_snip}" if doc_snip else "")
+            )
+
+        callers = result.get("blast_radius") or []
+        lines.append("")
+        lines.append(f"Stage 2 — Transitive Callers & Dependents ({len(callers)} affected within {hops} hop(s)):")
+        if not callers:
+            lines.append("  (No upstream callers found)")
+        else:
+            for item in callers:
+                lines.append(
+                    f"  [Hop {item['hop_depth']}] {item['qualified_name']} ({item['symbol_kind']}) "
+                    f"in {item['file_path']}:{item['line_number']} "
+                    f"--[{item['edge_kind']}]--> {item['callee']} "
+                    f"(via anchor `{item['anchor_qualified_name']}`)"
+                )
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error in locate_and_trace_blast_radius: {repr(e)}"
+
 

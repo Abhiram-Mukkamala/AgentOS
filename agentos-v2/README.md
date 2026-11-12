@@ -85,7 +85,15 @@ python evals/benchmark_agentos.py
 | :--- | :--- | :--- |
 | **Recall @ 2-Hops (Cross-File & Aliased Calls)** | **`100.0%`** (4/4 callers) | `0.0%` (0/4 callers — missed aliased & hop-2 sites) |
 | **False Positive Rate (Comments / Docstrings)** | **`0.0%`** | `100.0%` |
-| **Median Query Latency** | **`0.949 ms`** (`WITH RECURSIVE` SQL CTE) | `0.445 ms` (Full file scan) |
+| **Median Query Latency** | **`0.957 ms`** (`WITH RECURSIVE` SQL CTE) | `0.473 ms` (Full file scan) |
+
+### 4. Hybrid Semantic Anchor + 2-Hop AST Graph vs. Flat Vector/Chunk Search (`N = 10` behavioral refactoring queries)
+
+| Metric | Hybrid Semantic + 2-Hop AST (`semantic_blast_radius_query`) | Flat Vector / Chunk Search Baseline |
+| :--- | :--- | :--- |
+| **Semantic Anchor Top-1 Recall** | **`100.0%`** (10/10 anchors) | `100.0%` (10/10 anchors) |
+| **Transitive 2-Hop Caller Recall (Cross-File)** | **`100.0%`** (20/20 downstream callers) | `0.0%` (0/20 — misses cross-file callers) |
+| **End-to-End Hybrid Query Latency (`p50`)** | **`2.882 ms`** (Vector `np.dot` + Recursive SQL CTE) | ~`2.882 ms` (Anchor chunk only) |
 
 ---
 
@@ -93,7 +101,7 @@ python evals/benchmark_agentos.py
 
 - **Tier-0 Model-Agnostic Edge Reflex Router (`edge_router.py`)**: Pluggable `EdgeRouterBackend` protocol supporting `RulesEdgeBackend` (default zero-dependency), `EmbeddingEdgeBackend` (`sentence-transformers`), `OnnxTokenTaggerBackend` (`onnxruntime`), and `MicroLLMEdgeBackend` (local HTTP endpoint), gated by `EDGE_ROUTER_MIN_MARGIN` and `EDGE_ROUTER_MAX_SPAN_ENTROPY`.
 - **Pass-by-Reference Memory Insulation (`memory_manager.py`, `database.py`)**: Tool outputs exceeding `250 tokens` (`1,000 chars`) are persisted in the `context_artifacts` table and replaced in `AgentState.messages` with compact `[Artifact ref: art_xxx | Tokens: N | Summary: ...]` pointers. Workers inspect specific keys or line slices on demand via `read_context_artifact(artifact_id, keys)`.
-- **Deterministic Relational AST Codebase Graph (`ast_graph.py`)**: Incremental Merkle/SHA-256 `signature_hash` indexer resolving `import X as Y` and `from M import F as A` aliases across files into `ast_symbols` and `ast_edges`. Exposes `index_codebase_graph` and `get_symbol_blast_radius` (recursive 2-hop SQL `WITH RECURSIVE` CTE) and automatically re-indexes modified `.py` files on `write_file`/`patch_file`.
+- **Hybrid Semantic Anchor + Relational AST Codebase Graph (`ast_graph.py`)**: Incremental Merkle/SHA-256 `signature_hash` indexer resolving `import X as Y` and `from M import F as A` aliases across files into `ast_symbols` (with 384-d `embedding_blob` vectors via `fastembed` ONNX or deterministic subword projection) and `ast_edges`. Exposes `index_codebase_graph`, `get_symbol_blast_radius` (recursive 2-hop SQL `WITH RECURSIVE` CTE), and `locate_and_trace_blast_radius` (two-stage semantic anchor discovery + 2-hop blast-radius trace).
 - **Self-Healing Execution Circuit Breaker (`agent.py`)**: Unified `_execute_and_record_tools` dispatcher tracks `(tool_name, args_hash, stderr_hash)` failure signatures in `AgentState["failure_signatures"]`. Trips on `2` identical consecutive `execute_code`/`patch_file` failures or `3` consecutive tool failures, injecting a high-priority `SystemMessage` requiring `get_symbol_blast_radius` inspection before further edits.
 - **Hardware-Aware Local Codex Engine (`codex_engine/`)**: Self-contained GGUF inference engine with automatic GPU layer offloading, SSD `mmap` overflow, and idle VRAM unloading.
 

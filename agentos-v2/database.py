@@ -13,7 +13,7 @@ import os
 from datetime import datetime
 
 from dotenv import load_dotenv
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, event, select
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.pool import NullPool
@@ -127,7 +127,7 @@ class ContextArtifact(Base):
 class ASTSymbol(Base):
     """
     Indexed Python AST symbol node (function, method, or class) for the
-    deterministic relational codebase graph (Phase 4.2).
+    deterministic relational codebase graph (Phase 4.2 & Phase 7).
     """
     __tablename__ = "ast_symbols"
 
@@ -140,6 +140,8 @@ class ASTSymbol(Base):
     start_line     = Column(Integer, nullable=False)
     end_line       = Column(Integer, nullable=False)
     signature_hash = Column(String(64), nullable=False)
+    docstring      = Column(Text, nullable=True, default="")
+    embedding_blob = Column(LargeBinary, nullable=True)
 
 
 class ASTEdge(Base):

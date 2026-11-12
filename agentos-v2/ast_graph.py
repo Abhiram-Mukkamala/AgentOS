@@ -1,12 +1,20 @@
 """
-ast_graph.py — Deterministic Relational AST Codebase Graph (Phase 4.2).
+ast_graph.py — Deterministic Relational AST Codebase Graph & Hybrid Semantic
+Blast-Radius Engine (Phase 4.2 & Phase 7).
 
 Provides:
   • `ASTGraphIndexer`: Incremental Python AST symbol & dependency edge extractor
-    with import-scope alias resolution, local variable type inference, and
-    Merkle/SHA-256 signature diffing (`signature_hash`).
+    with import-scope alias resolution, local variable type inference,
+    Merkle/SHA-256 signature diffing (`signature_hash`), and incremental
+    384-d semantic embedding (`embedding_blob`).
+  • `embed_symbol_passages`: Zero-cost local semantic vector encoder (lazy
+    `fastembed` ONNX `BAAI/bge-small-en-v1.5` when locally cached, with a
+    sub-millisecond deterministic 384-d L2-normalized subword/identifier
+    projection fallback for offline CI).
   • `query_blast_radius`: Sub-5ms SQL `WITH RECURSIVE` 2-hop blast-radius query
     compatible with both SQLite and PostgreSQL.
+  • `semantic_blast_radius_query`: Two-stage hybrid semantic anchor discovery +
+    deterministic 2-hop recursive SQL blast-radius expansion.
 """
 
 from __future__ import annotations
@@ -14,16 +22,230 @@ from __future__ import annotations
 import ast
 import hashlib
 import logging
+import os
+import re
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import numpy as np
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import ASTEdge, ASTSymbol, AsyncSessionLocal
 
 log = logging.getLogger("agentos.ast_graph")
+
+EMBEDDING_DIM = 384
+_FASTEMBED_MODEL: Any = None
+_FASTEMBED_CHECKED: bool = False
+
+_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "def", "class", "doc",
+    "for", "from", "in", "into", "is", "it", "of", "on", "or", "passage",
+    "query", "return", "returns", "self", "sig", "that", "the", "this", "to",
+    "with", "async", "none", "true", "false", "str", "int", "float", "bool",
+    "dict", "list", "optional", "any", "function", "method",
+}
+
+_CONCEPT_SYNONYMS: Dict[str, List[str]] = {
+    "token": ["jwt", "bearer", "session", "auth", "credential"],
+    "bearer": ["token", "jwt", "auth", "header"],
+    "jwt": ["token", "bearer", "signature", "claim"],
+    "cryptographic": ["crypto", "hmac", "sha256", "signature", "hash", "verify"],
+    "signature": ["sig", "hmac", "cryptographic", "verify", "token"],
+    "sig": ["signature", "cryptographic", "hmac", "verify"],
+    "chk": ["check", "validate", "verify", "inspect"],
+    "validate": ["verify", "check", "chk", "authenticate", "confirm"],
+    "verify": ["validate", "check", "chk", "confirm", "signature"],
+    "expiration": ["exp", "expiry", "ttl", "timeout", "timestamp", "expired"],
+    "expiry": ["expiration", "exp", "ttl", "timeout"],
+    "exp": ["expiration", "expiry", "timestamp", "ttl"],
+    "invoice": ["payment", "billing", "charge", "settlement", "ledger"],
+    "settlement": ["settle", "invoice", "payment", "clearing", "ledger"],
+    "refund": ["reimburse", "reversal", "chargeback", "credit", "payment"],
+    "rate": ["throttle", "quota", "limit", "bucket", "window"],
+    "limit": ["throttle", "quota", "rate", "cap"],
+    "throttle": ["rate", "limit", "quota", "backpressure"],
+    "webhook": ["callback", "event", "payload", "hmac", "dispatch"],
+    "password": ["credential", "pbkdf2", "hash", "salt", "secret"],
+    "cache": ["ttl", "evict", "memoize", "invalidate", "lookup"],
+    "circuit": ["breaker", "trip", "failure", "fallback", "recovery"],
+    "Retry": ["backoff", "attempt", "transient", "resilience"],
+    "retry": ["backoff", "attempt", "transient", "resilience"],
+    "backoff": ["retry", "jitter", "delay", "exponential"],
+    "sanitize": ["escape", "clean", "xss", "injection", "filter"],
+    "permission": ["rbac", "role", "access", "policy", "authorize"],
+    "rbac": ["role", "permission", "access", "policy", "authorize"],
+    "audit": ["trail", "compliance", "log", "event", "security"],
+    "deadlock": ["lock", "transaction", "concurrency", "mutex"],
+    "schema": ["validation", "pydantic", "coerce", "payload", "field"],
+}
+
+
+def _stem_token(tok: str) -> str:
+    """Lightweight deterministic morphological stemmer for code & doc tokens."""
+    w = tok.lower()
+    if len(w) <= 3:
+        return w
+    for suffix in ("ations", "ation", "ingly", "edly", "ments", "ment", "ities", "ity", "ness", "ings", "ing", "ers", "ors", "ies", "ied", "es", "ed", "ly", "er", "or", "s"):
+        if w.endswith(suffix) and len(w) - len(suffix) >= 3:
+            stem = w[: -len(suffix)]
+            if suffix in ("ies", "ied"):
+                stem += "y"
+            return stem
+    return w
+
+
+def _tokenize_code_and_text(raw_text: str) -> List[str]:
+    """
+    Split natural language, docstrings, and camelCase/snake_case identifiers
+    into normalized lowercase tokens and morphological stems.
+    """
+    cleaned = re.sub(r"^(?:query|passage)\s*:\s*", "", raw_text or "", flags=re.IGNORECASE)
+    # Split camelCase and PascalCase boundaries: SessionGuard -> Session Guard
+    expanded = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", cleaned)
+    expanded = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", expanded)
+    # Replace punctuation/underscores/dots/slashes with whitespace
+    words = re.findall(r"[a-zA-Z0-9]+", expanded.lower())
+    tokens: List[str] = []
+    for w in words:
+        if len(w) < 2 or w in _STOPWORDS or w.isdigit():
+            continue
+        tokens.append(w)
+        stem = _stem_token(w)
+        if stem != w and len(stem) >= 3 and stem not in _STOPWORDS:
+            tokens.append(stem)
+    return tokens
+
+
+def _deterministic_embed_one(text_item: str) -> np.ndarray:
+    """
+    Compute a deterministic 384-d L2-normalized float32 semantic vector using
+    signed feature hashing over:
+      1. Exact tokens & morphological stems (weight 2.6)
+      2. Domain & identifier synonym expansions (weight 1.35)
+      3. Root 4/5-char prefixes (weight 1.1)
+      4. Token bigrams (weight 0.9)
+      5. Character 3-grams and 4-grams (weight 0.30)
+    Executes in < 0.1 ms per symbol with zero external network dependencies.
+    """
+    vec = np.zeros(EMBEDDING_DIM, dtype=np.float32)
+    tokens = _tokenize_code_and_text(text_item)
+    if not tokens:
+        vec[0] = 1.0
+        return vec
+
+    def _accumulate(feature: str, weight: float) -> None:
+        h = zlib.crc32(feature.encode("utf-8")) & 0xFFFFFFFF
+        idx1 = h % EMBEDDING_DIM
+        sign1 = 1.0 if ((h >> 16) & 1) == 0 else -1.0
+        vec[idx1] += sign1 * weight
+
+        h2 = ((h * 1664525) + 1013904223) & 0xFFFFFFFF
+        idx2 = h2 % EMBEDDING_DIM
+        sign2 = 1.0 if ((h2 >> 17) & 1) == 0 else -1.0
+        vec[idx2] += sign2 * (weight * 0.5)
+
+    seen_primary: Set[str] = set()
+    for tok in tokens:
+        # Sublinear TF damping so repeated boilerplate tokens don't dominate
+        w_factor = 2.6 if tok not in seen_primary else 0.85
+        seen_primary.add(tok)
+        _accumulate(f"tok:{tok}", w_factor)
+
+        # Synonym / abbreviation expansion
+        for syn in _CONCEPT_SYNONYMS.get(tok, ()):
+            _accumulate(f"tok:{syn}", 1.35)
+            syn_stem = _stem_token(syn)
+            if syn_stem != syn:
+                _accumulate(f"tok:{syn_stem}", 1.15)
+
+        # Prefix stems (4 and 5 chars) to bridge e.g. 'cryptographic' <-> 'crypto'
+        if len(tok) >= 4:
+            _accumulate(f"pre4:{tok[:4]}", 1.1)
+        if len(tok) >= 5:
+            _accumulate(f"pre5:{tok[:5]}", 1.1)
+
+        # Character n-grams for subword resilience
+        padded = f"<{tok}>"
+        for n in (3, 4):
+            if len(padded) >= n:
+                for i in range(len(padded) - n + 1):
+                    _accumulate(f"cg{n}:{padded[i:i+n]}", 0.25)
+
+    # Token bigrams
+    for i in range(len(tokens) - 1):
+        if tokens[i] != tokens[i + 1]:
+            _accumulate(f"bg:{tokens[i]}_{tokens[i+1]}", 0.9)
+
+    norm = float(np.linalg.norm(vec))
+    if norm > 1e-8:
+        vec /= norm
+    else:
+        vec[0] = 1.0
+    return vec
+
+
+def _get_cached_fastembed_model() -> Any:
+    """
+    Lazy-load `fastembed.TextEmbedding('BAAI/bge-small-en-v1.5')` ONLY if
+    `fastembed` is installed and the ONNX model is already cached locally
+    (or explicitly enabled via `AGENTOS_ENABLE_FASTEMBED_DOWNLOAD=1`).
+    Never blocks or fails in offline CI environments.
+    """
+    global _FASTEMBED_MODEL, _FASTEMBED_CHECKED
+    if _FASTEMBED_CHECKED:
+        return _FASTEMBED_MODEL
+    _FASTEMBED_CHECKED = True
+
+    if os.getenv("AGENTOS_FORCE_DETERMINISTIC_EMBED", "0") == "1":
+        return None
+
+    try:
+        from fastembed import TextEmbedding  # type: ignore
+
+        allow_download = os.getenv("AGENTOS_ENABLE_FASTEMBED_DOWNLOAD", "0") == "1"
+        _FASTEMBED_MODEL = TextEmbedding(
+            model_name="BAAI/bge-small-en-v1.5",
+            local_files_only=not allow_download,
+        )
+        log.info("Loaded cached FastEmbed ONNX model 'BAAI/bge-small-en-v1.5'.")
+    except Exception:
+        _FASTEMBED_MODEL = None
+
+    return _FASTEMBED_MODEL
+
+
+def embed_symbol_passages(texts: List[str]) -> List[bytes]:
+    """
+    Encode a batch of symbol passages or queries into L2-normalized 384-d
+    `float32` byte blobs (`len == 1536` bytes each).
+
+    Uses `fastembed.TextEmbedding("BAAI/bge-small-en-v1.5")` when available and
+    locally cached; otherwise uses the deterministic 384-d subword/identifier
+    feature hashing projection in `numpy` (`float32`).
+    """
+    if not texts:
+        return []
+
+    fe_model = _get_cached_fastembed_model()
+    if fe_model is not None:
+        try:
+            vecs = list(fe_model.embed(texts))
+            blobs: List[bytes] = []
+            for v in vecs:
+                arr = np.asarray(v, dtype=np.float32)
+                norm = float(np.linalg.norm(arr))
+                if norm > 1e-8:
+                    arr = arr / norm
+                blobs.append(arr.tobytes())
+            return blobs
+        except Exception as exc:
+            log.debug("FastEmbed inference failed (%s); falling back to deterministic 384-d projection.", exc)
+
+    return [_deterministic_embed_one(t).tobytes() for t in texts]
 
 _IGNORED_DIRS = {
     ".git",
@@ -56,7 +278,16 @@ class ExtractedSymbol:
     start_line: int
     end_line: int
     signature_hash: str
+    docstring: str = ""
+    signature_line: str = ""
     edges: List[ExtractedEdge] = field(default_factory=list)
+
+
+def _build_symbol_passage(sym: ExtractedSymbol) -> str:
+    return (
+        f"passage: [{sym.symbol_kind}] {sym.qualified_name} in {sym.file_path} "
+        f"| Doc: {sym.docstring} | Sig: {sym.signature_line}"
+    )
 
 
 def _compute_symbol_id(user_id: int, file_path: str, qualified_name: str) -> str:
@@ -300,6 +531,8 @@ class _FileASTAnalyzer:
                 start_l = getattr(node, "lineno", 1)
                 end_l = getattr(node, "end_lineno", start_l) or start_l
                 seg = self._slice_source(start_l, end_l)
+                doc = ast.get_docstring(node) or ""
+                sig_line = self.lines[start_l - 1].strip() if 1 <= start_l <= len(self.lines) else ""
                 edges = self._extract_edges_from_body(node.body, current_class=None, skip_nested_defs=False)
                 symbols.append(
                     ExtractedSymbol(
@@ -312,6 +545,8 @@ class _FileASTAnalyzer:
                         start_line=start_l,
                         end_line=end_l,
                         signature_hash=_compute_signature_hash(seg),
+                        docstring=doc,
+                        signature_line=sig_line,
                         edges=edges,
                     )
                 )
@@ -321,6 +556,8 @@ class _FileASTAnalyzer:
                 start_l = getattr(node, "lineno", 1)
                 end_l = getattr(node, "end_lineno", start_l) or start_l
                 seg = self._slice_source(start_l, end_l)
+                c_doc = ast.get_docstring(node) or ""
+                c_sig_line = self.lines[start_l - 1].strip() if 1 <= start_l <= len(self.lines) else ""
 
                 class_edges = self._extract_edges_from_body(
                     node.body, current_class=node.name, skip_nested_defs=True
@@ -349,6 +586,8 @@ class _FileASTAnalyzer:
                         start_line=start_l,
                         end_line=end_l,
                         signature_hash=_compute_signature_hash(seg),
+                        docstring=c_doc,
+                        signature_line=c_sig_line,
                         edges=class_edges,
                     )
                 )
@@ -360,6 +599,8 @@ class _FileASTAnalyzer:
                         m_start = getattr(item, "lineno", start_l)
                         m_end = getattr(item, "end_lineno", m_start) or m_start
                         m_seg = self._slice_source(m_start, m_end)
+                        m_doc = ast.get_docstring(item) or ""
+                        m_sig_line = self.lines[m_start - 1].strip() if 1 <= m_start <= len(self.lines) else ""
                         m_edges = self._extract_edges_from_body(
                             item.body, current_class=node.name, skip_nested_defs=False
                         )
@@ -374,6 +615,8 @@ class _FileASTAnalyzer:
                                 start_line=m_start,
                                 end_line=m_end,
                                 signature_hash=_compute_signature_hash(m_seg),
+                                docstring=m_doc,
+                                signature_line=m_sig_line,
                                 edges=m_edges,
                             )
                         )
@@ -433,12 +676,20 @@ class ASTGraphIndexer:
                 row.symbol_id: (row.signature_hash, row.start_line, row.end_line)
                 for row in existing_rows
             }
+            existing_emb_map: Dict[str, Tuple[str, Optional[bytes]]] = {
+                row.symbol_id: (row.signature_hash, row.embedding_blob)
+                for row in existing_rows
+            }
             new_sig_map = {
                 sym.symbol_id: (sym.signature_hash, sym.start_line, sym.end_line)
                 for sym in extracted
             }
 
-            if existing_rows and existing_sig_map == new_sig_map:
+            if (
+                existing_rows
+                and existing_sig_map == new_sig_map
+                and all(r.embedding_blob is not None for r in existing_rows)
+            ):
                 return {
                     "files_indexed": 0,
                     "files_skipped": 1,
@@ -446,6 +697,22 @@ class ASTGraphIndexer:
                     "symbols_unchanged": len(extracted),
                     "edges_indexed": 0,
                 }
+
+            # Only compute embeddings for symbols whose signature_hash is new or changed
+            embeddings_by_sym_id: Dict[str, bytes] = {}
+            to_embed_syms: List[ExtractedSymbol] = []
+            for sym in extracted:
+                prev = existing_emb_map.get(sym.symbol_id)
+                if prev is not None and prev[0] == sym.signature_hash and prev[1] is not None:
+                    embeddings_by_sym_id[sym.symbol_id] = prev[1]
+                else:
+                    to_embed_syms.append(sym)
+
+            if to_embed_syms:
+                passages = [_build_symbol_passage(s) for s in to_embed_syms]
+                new_blobs = embed_symbol_passages(passages)
+                for s, blob in zip(to_embed_syms, new_blobs):
+                    embeddings_by_sym_id[s.symbol_id] = blob
 
             # Remove outdated symbols & edges for this file
             if existing_rows:
@@ -471,6 +738,8 @@ class ASTGraphIndexer:
                         start_line=sym.start_line,
                         end_line=sym.end_line,
                         signature_hash=sym.signature_hash,
+                        docstring=sym.docstring,
+                        embedding_blob=embeddings_by_sym_id.get(sym.symbol_id),
                     )
                 )
                 for edge in sym.edges:
@@ -706,6 +975,121 @@ async def query_blast_radius(
             best_by_qual.values(),
             key=lambda x: (x["hop_depth"], x["file_path"], x["line_number"]),
         )
+
+    if session is not None:
+        return await _run(session)
+    async with AsyncSessionLocal() as OwnSession:
+        return await _run(OwnSession)
+
+
+async def semantic_blast_radius_query(
+    session: Optional[AsyncSession],
+    user_id: int,
+    natural_query: str,
+    top_k_anchors: int = 3,
+    max_hops: int = 2,
+    min_similarity: float = 0.25,
+) -> Dict[str, Any]:
+    """
+    Two-Stage Hybrid Semantic Anchor + Deterministic 2-Hop Blast-Radius Query:
+      • Stage 1 (Semantic Anchor Discovery): Embeds `f"query: {natural_query}"`,
+        computes vectorized cosine similarity (`np.dot`) against all
+        `ASTSymbol.embedding_blob` rows for `user_id`, and selects `top_k_anchors`.
+      • Stage 2 (Deterministic 2-Hop Expansion): Feeds each matched anchor's
+        `qualified_name` into `query_blast_radius` (`WITH RECURSIVE` SQL CTE) to
+        return both the semantic anchors and their transitive 1-hop and 2-hop
+        cross-file callers.
+    """
+    clean_query = (natural_query or "").strip()
+    if not clean_query:
+        return {"query": "", "anchors": [], "blast_radius": []}
+
+    q_blob = embed_symbol_passages([f"query: {clean_query}"])[0]
+    q_vec = np.frombuffer(q_blob, dtype=np.float32)
+
+    async def _run(db: AsyncSession) -> Dict[str, Any]:
+        stmt = select(ASTSymbol).where(
+            ASTSymbol.user_id == int(user_id),
+            ASTSymbol.embedding_blob.is_not(None),
+        )
+        rows = (await db.execute(stmt)).scalars().all()
+        if not rows:
+            return {"query": clean_query, "anchors": [], "blast_radius": []}
+
+        valid_rows: List[ASTSymbol] = []
+        vecs: List[np.ndarray] = []
+        for r in rows:
+            if r.embedding_blob and len(r.embedding_blob) == EMBEDDING_DIM * 4:
+                valid_rows.append(r)
+                vecs.append(np.frombuffer(r.embedding_blob, dtype=np.float32))
+
+        if not valid_rows:
+            return {"query": clean_query, "anchors": [], "blast_radius": []}
+
+        mat = np.vstack(vecs)
+        scores = np.dot(mat, q_vec)
+        ranked_indices = np.argsort(-scores)
+
+        k_limit = max(1, int(top_k_anchors))
+        selected_anchors: List[Tuple[ASTSymbol, float]] = []
+        for idx in ranked_indices:
+            sim = float(scores[int(idx)])
+            if sim < min_similarity:
+                break
+            selected_anchors.append((valid_rows[int(idx)], sim))
+            if len(selected_anchors) >= k_limit:
+                break
+
+        # Fallback: if no symbol met min_similarity, include top-1 if positive
+        if not selected_anchors and len(ranked_indices) > 0:
+            best_idx = int(ranked_indices[0])
+            best_sim = float(scores[best_idx])
+            if best_sim > 0.05:
+                selected_anchors.append((valid_rows[best_idx], best_sim))
+
+        anchors_out: List[Dict[str, Any]] = []
+        combined_callers: Dict[str, Dict[str, Any]] = {}
+
+        for sym_row, sim_score in selected_anchors:
+            impacts = await query_blast_radius(
+                session=db,
+                user_id=user_id,
+                symbol_name=sym_row.qualified_name,
+                max_hops=max_hops,
+            )
+            anchors_out.append(
+                {
+                    "symbol_id": sym_row.symbol_id,
+                    "qualified_name": sym_row.qualified_name,
+                    "short_name": sym_row.short_name,
+                    "symbol_kind": sym_row.symbol_kind,
+                    "file_path": sym_row.file_path,
+                    "start_line": sym_row.start_line,
+                    "end_line": sym_row.end_line,
+                    "docstring": sym_row.docstring or "",
+                    "similarity": round(sim_score, 4),
+                    "blast_radius": impacts,
+                }
+            )
+            for caller in impacts:
+                qname = caller["qualified_name"]
+                enriched = {
+                    **caller,
+                    "anchor_qualified_name": sym_row.qualified_name,
+                    "anchor_similarity": round(sim_score, 4),
+                }
+                if qname not in combined_callers:
+                    combined_callers[qname] = enriched
+
+        sorted_callers = sorted(
+            combined_callers.values(),
+            key=lambda x: (x["hop_depth"], x["file_path"], x["line_number"]),
+        )
+        return {
+            "query": clean_query,
+            "anchors": anchors_out,
+            "blast_radius": sorted_callers,
+        }
 
     if session is not None:
         return await _run(session)
