@@ -13,7 +13,7 @@ import os
 from datetime import datetime
 
 from dotenv import load_dotenv
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, select
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.pool import NullPool
@@ -36,6 +36,17 @@ DATABASE_URL = _raw_url
 # ── Engine & Session ────────────────────────────────────────────────────────────
 
 engine = create_async_engine(DATABASE_URL, poolclass=NullPool, echo=False)
+
+
+@event.listens_for(engine.sync_engine, "connect")
+def _enable_sqlite_fks(dbapi_conn, _connection_record):
+    """Ensure ON DELETE CASCADE works in SQLite connections."""
+    if DATABASE_URL.startswith("sqlite"):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+
 AsyncSessionLocal = async_sessionmaker(
     bind=engine, class_=AsyncSession, expire_on_commit=False
 )
@@ -91,6 +102,60 @@ class Improvement(Base):
     category    = Column(String(50), default="general")   # bug-fix|refactor|performance|security|feature|general
     impact      = Column(String(20), default="medium")    # low|medium|high
     created_at  = Column(DateTime, default=datetime.utcnow)
+
+
+class ContextArtifact(Base):
+    """
+    Pass-by-reference offloaded context artifact (Phase 4.1).
+    Stores large tool outputs, research digests, AST slices, patch diffs, and
+    archived conversation turns out-of-band so AgentState.messages carries only
+    compact pointers.
+    """
+    __tablename__ = "context_artifacts"
+
+    artifact_id    = Column(String(32), primary_key=True, index=True)
+    user_id        = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    thread_id      = Column(String(128), index=True, nullable=False, default="default")
+    producer_agent = Column(String(64), nullable=False)
+    artifact_type  = Column(String(64), nullable=False)
+    summary        = Column(Text, nullable=False)
+    payload_json   = Column(Text, nullable=False)
+    token_count    = Column(Integer, nullable=False, default=0)
+    created_at     = Column(DateTime, default=datetime.utcnow)
+
+
+class ASTSymbol(Base):
+    """
+    Indexed Python AST symbol node (function, method, or class) for the
+    deterministic relational codebase graph (Phase 4.2).
+    """
+    __tablename__ = "ast_symbols"
+
+    symbol_id      = Column(String(64), primary_key=True, index=True)
+    user_id        = Column(Integer, index=True, nullable=False)
+    file_path      = Column(String(512), index=True, nullable=False)
+    qualified_name = Column(String(512), index=True, nullable=False)
+    short_name     = Column(String(128), index=True, nullable=False)
+    symbol_kind    = Column(String(32), nullable=False)   # function|method|class
+    start_line     = Column(Integer, nullable=False)
+    end_line       = Column(Integer, nullable=False)
+    signature_hash = Column(String(64), nullable=False)
+
+
+class ASTEdge(Base):
+    """
+    Directed dependency edge between an `ASTSymbol` caller and a target symbol
+    (`CALLS`, `IMPORTS`, `INHERITS`) for 2-hop blast-radius queries (Phase 4.2).
+    """
+    __tablename__ = "ast_edges"
+
+    id                    = Column(Integer, primary_key=True, autoincrement=True)
+    user_id               = Column(Integer, index=True, nullable=False)
+    caller_id             = Column(String(64), ForeignKey("ast_symbols.symbol_id", ondelete="CASCADE"), index=True, nullable=False)
+    callee_qualified_name = Column(String(512), index=True, nullable=False)
+    callee_short_name     = Column(String(128), index=True, nullable=False)
+    edge_kind             = Column(String(32), nullable=False)   # CALLS|IMPORTS|INHERITS
+    line_number           = Column(Integer, nullable=False)
 
 
 # ── Shared Cryptographic & Local Dev User Helpers ───────────────────────────────

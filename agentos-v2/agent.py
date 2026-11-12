@@ -54,10 +54,13 @@ from tools import (
     analyze_code,
     execute_code,
     get_snippets,
+    get_symbol_blast_radius,
+    index_codebase_graph,
     index_repo,
     list_directory,
     log_improvement,
     patch_file,
+    read_context_artifact,
     read_file,
     run_shell_command,
     run_tests,
@@ -924,9 +927,12 @@ codex_tools = [
     run_tests,
     run_shell_command,
     index_repo,
+    index_codebase_graph,
+    get_symbol_blast_radius,
+    read_context_artifact,
 ]
-research_tools = [web_search, scrape_page, search_algorithms]
-db_tools = [save_code_snippet, get_snippets, log_improvement]
+research_tools = [web_search, scrape_page, search_algorithms, read_context_artifact]
+db_tools = [save_code_snippet, get_snippets, log_improvement, read_context_artifact]
 
 _ALL_TOOLS = {t.name: t for t in (codex_tools + research_tools + db_tools)}
 

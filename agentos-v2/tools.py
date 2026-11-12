@@ -11,6 +11,7 @@ DBAgent       → save_code_snippet, get_snippets, log_improvement
 import ast
 import asyncio
 import difflib
+import json
 import logging
 import os
 import pathlib
@@ -29,7 +30,9 @@ try:
 except ImportError:
     DDGS = None
 
+from ast_graph import ast_graph_indexer, query_blast_radius
 from database import AsyncSessionLocal, CodeSnippet, Improvement, get_or_create_local_dev_user
+from memory_manager import fetch_context_artifact
 
 log = logging.getLogger("agentos.tools")
 
@@ -168,7 +171,11 @@ async def list_directory(path: str = ".") -> str:
 
 
 @tool
-async def write_file(path: str, content: str) -> str:
+async def write_file(
+    path: str,
+    content: str,
+    config: Optional[RunnableConfig] = None,
+) -> str:
     """Create or fully overwrite a file with the given content.
     USE ONLY IN AUTONOMOUS MODE — when the developer explicitly says
     'create this file', 'implement this', 'write this to X'.
@@ -177,13 +184,29 @@ async def write_file(path: str, content: str) -> str:
         resolved = _safe_resolve(path)
         resolved.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(resolved.write_text, content, encoding="utf-8")
+        if resolved.suffix == ".py":
+            try:
+                user_id = await _get_user_id(config)
+                await ast_graph_indexer.index_single_file(
+                    session=None,
+                    user_id=user_id,
+                    file_path=resolved,
+                    workspace_root=_PROJECT_ROOT,
+                )
+            except Exception as idx_err:
+                log.debug("Incremental AST re-index after write_file failed: %s", idx_err)
         return f"Wrote {len(content.splitlines())} lines to {resolved}"
     except Exception as e:
         return f"Error writing file: {repr(e)}"
 
 
 @tool
-async def patch_file(path: str, old_lines: str, new_lines: str) -> str:
+async def patch_file(
+    path: str,
+    old_lines: str,
+    new_lines: str,
+    config: Optional[RunnableConfig] = None,
+) -> str:
     """Surgically replace a block of lines in an existing file using a fuzzy
     unified-diff patch. Safer than raw string replace because it:
       • Strips trailing whitespace before matching (catches invisible space diffs)
@@ -235,6 +258,18 @@ async def patch_file(path: str, old_lines: str, new_lines: str) -> str:
         updated = updated_norm.replace("\n", eol)
 
         await asyncio.to_thread(resolved.write_text, updated, encoding="utf-8")
+
+        if resolved.suffix == ".py":
+            try:
+                user_id = await _get_user_id(config)
+                await ast_graph_indexer.index_single_file(
+                    session=None,
+                    user_id=user_id,
+                    file_path=resolved,
+                    workspace_root=_PROJECT_ROOT,
+                )
+            except Exception as idx_err:
+                log.debug("Incremental AST re-index after patch_file failed: %s", idx_err)
 
         diff = list(
             difflib.unified_diff(
@@ -695,3 +730,103 @@ async def log_improvement(
         except Exception as e:
             await db.rollback()
             return f"DB Error: {e}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 4: ARTIFACT INSULATION & RELATIONAL AST GRAPH TOOLS
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+@tool
+async def read_context_artifact(
+    artifact_id: str,
+    keys: str = "",
+    config: Optional[RunnableConfig] = None,
+) -> str:
+    """Inspect a pass-by-reference ContextArtifact (`art_...`) stored out-of-band.
+    Pass `keys` as comma-separated field names (e.g. 'head,tail' or 'lines:1-40')
+    to retrieve only a targeted slice without flooding the context window."""
+    user_id = await _get_user_id(config)
+    key_list = [k.strip() for k in keys.split(",") if k.strip()] if keys else None
+    result = await fetch_context_artifact(
+        session=None,
+        user_id=user_id,
+        artifact_id=artifact_id,
+        keys=key_list,
+    )
+    if "error" in result:
+        return result["error"]
+    data = result.get("data")
+    if isinstance(data, (dict, list)):
+        formatted = json.dumps(data, indent=2, ensure_ascii=False)
+    else:
+        formatted = str(data)
+    return (
+        f"Artifact {result['artifact_id']} ({result['artifact_type']} by {result['producer_agent']}):\n"
+        f"{formatted}"
+    )
+
+
+@tool
+async def index_codebase_graph(
+    subpath: str = ".",
+    config: Optional[RunnableConfig] = None,
+) -> str:
+    """Incrementally index Python AST symbols (`function`, `method`, `class`) and
+    call/import/inheritance edges into the relational codebase graph.
+    Uses SHA-256 signature hashes to skip unchanged files automatically."""
+    try:
+        resolved = _safe_resolve(subpath)
+        user_id = await _get_user_id(config)
+        stats = await ast_graph_indexer.index_workspace(
+            session=None,
+            user_id=user_id,
+            workspace_root=resolved,
+        )
+        return (
+            f"AST Graph Indexed for '{subpath}': "
+            f"{stats['files_indexed']} files indexed, "
+            f"{stats['files_skipped']} unchanged files skipped, "
+            f"{stats['symbols_indexed']} symbols updated, "
+            f"{stats['symbols_unchanged']} symbols unchanged, "
+            f"{stats['edges_indexed']} dependency edges recorded."
+        )
+    except PermissionError as e:
+        return f"Security Error: {e}"
+    except Exception as e:
+        return f"Error indexing AST graph: {repr(e)}"
+
+
+@tool
+async def get_symbol_blast_radius(
+    symbol_name: str,
+    hops: int = 2,
+    config: Optional[RunnableConfig] = None,
+) -> str:
+    """Query the relational AST call-graph for the N-hop blast radius (upstream
+    callers, subclasses, and importers) of `symbol_name`.
+    Use before refactoring a function/class or when diagnosing a test failure."""
+    try:
+        user_id = await _get_user_id(config)
+        impacts = await query_blast_radius(
+            session=None,
+            user_id=user_id,
+            symbol_name=symbol_name,
+            max_hops=hops,
+        )
+        if not impacts:
+            return f"No callers or dependents found for `{symbol_name}` within {hops} hop(s)."
+        lines = [
+            f"Blast Radius for `{symbol_name}` ({len(impacts)} affected symbol(s) within {hops} hop(s)):",
+            "─" * 60,
+        ]
+        for item in impacts:
+            lines.append(
+                f"  [Hop {item['hop_depth']}] {item['qualified_name']} ({item['symbol_kind']}) "
+                f"in {item['file_path']}:{item['line_number']} "
+                f"--[{item['edge_kind']}]--> {item['callee']}"
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error querying blast radius: {repr(e)}"
+
