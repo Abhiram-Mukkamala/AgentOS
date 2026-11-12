@@ -1003,7 +1003,7 @@ def _is_tool_failure(tool_name: str, output: str) -> bool:
         return True
     if tool_name in ("execute_code", "patch_file") and (
         "Traceback (most recent call last):" in text
-        or re.search(r"\b(?:Error|Exception):", text)
+        or re.search(r"\b\w*(?:Error|Exception)\s*[:(]", text)
     ):
         return True
     return False

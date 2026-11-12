@@ -335,7 +335,7 @@ def extract_slots_and_entropy(tool_name: str, prompt: str) -> Tuple[Dict[str, An
         inline = re.search(
             r"\b(?:execute|run|eval|analyze)\s+(?:python\s+)?(?:code\s*)?`([^`]+)`",
             text,
-            re.IGNORECASE,
+            re.IGNORECASE | re.DOTALL,
         )
         if inline:
             return {"code": inline.group(1).strip()}, 0.12
@@ -393,7 +393,7 @@ class RulesEdgeBackend:
 
     _INTENT_PATTERNS: Dict[str, List[Tuple[re.Pattern, float]]] = {
         "read_file": [
-            (re.compile(r"^(?:please\s+)?(?:read|cat|view|open|show)\s+(?:the\s+)?(?:contents?\s+of\s+)?(?:file\s+)?\S+", re.I), 0.92),
+            (re.compile(r"^(?:please\s+)?(?:read|cat|view|open|show)\s+(?!all\s+files|files\s+in|directory|folder|workspace|my\s+|saved\s+|snippets?\b)(?:the\s+)?(?:contents?\s+of\s+)?(?:file\s+)?\S+", re.I), 0.92),
             (re.compile(r"\bread_file\b", re.I), 0.95),
         ],
         "list_directory": [
@@ -417,7 +417,7 @@ class RulesEdgeBackend:
             (re.compile(r"\banalyze_code\b", re.I), 0.95),
         ],
         "get_snippets": [
-            (re.compile(r"^(?:please\s+)?(?:list|show|get|fetch)\s+(?:my\s+|saved\s+|all\s+)?snippets?\b", re.I), 0.90),
+            (re.compile(r"^(?:please\s+)?(?:list|show|get|fetch)\s+(?:(?:my|saved|all|python|javascript|typescript|rust|go|sql|java|cpp|bash)\s+)*snippets?\b", re.I), 0.90),
             (re.compile(r"\bget_snippets\b", re.I), 0.95),
         ],
         "web_search": [
@@ -983,15 +983,26 @@ class EdgeRouter:
         config = RunnableConfig(
             configurable={"user_id": user_id, "thread_id": thread_id}
         )
+        invoke_args = dict(decision.extracted_args)
+        if decision.target_agent_or_tool == "read_file" and "filepath" in invoke_args and "path" not in invoke_args:
+            invoke_args["path"] = invoke_args.pop("filepath")
+        elif decision.target_agent_or_tool == "list_directory" and "directory_path" in invoke_args and "path" not in invoke_args:
+            invoke_args["path"] = invoke_args.pop("directory_path")
+        elif decision.target_agent_or_tool == "search_codebase":
+            if "query" in invoke_args and "pattern" not in invoke_args:
+                invoke_args["pattern"] = invoke_args.pop("query")
+            if "directory_path" in invoke_args and "path" not in invoke_args:
+                invoke_args["path"] = invoke_args.pop("directory_path")
+
         try:
             if hasattr(tool_obj, "ainvoke"):
-                raw_result = await tool_obj.ainvoke(decision.extracted_args, config=config)
+                raw_result = await tool_obj.ainvoke(invoke_args, config=config)
             elif hasattr(tool_obj, "invoke"):
                 raw_result = await asyncio.to_thread(
-                    tool_obj.invoke, decision.extracted_args, config
+                    tool_obj.invoke, invoke_args, config
                 )
             else:
-                raw_result = await asyncio.to_thread(tool_obj, **decision.extracted_args)
+                raw_result = await asyncio.to_thread(tool_obj, **invoke_args)
             return decision, str(raw_result)
         except Exception as exc:
             log.warning(

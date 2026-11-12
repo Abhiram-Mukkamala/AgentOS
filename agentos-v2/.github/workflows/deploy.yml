@@ -34,13 +34,16 @@ jobs:
           DATABASE_URL: sqlite+aiosqlite:///./test.db
         run: |
           python -c "
-          from database import Base, CodeSnippet, Improvement, User
+          from database import Base, CodeSnippet, Improvement, User, ContextArtifact, ASTSymbol, ASTEdge
           from tools import (
               execute_code, analyze_code, read_file, write_file,
               patch_file, list_directory, run_shell_command,
               web_search, scrape_page, search_algorithms,
               save_code_snippet, get_snippets, log_improvement,
+              read_context_artifact, index_codebase_graph, get_symbol_blast_radius,
           )
+          from ast_graph import ASTGraphIndexer, query_blast_radius
+          from memory_manager import store_context_artifact, fetch_context_artifact, compact_conversation_window
           from agent import graph, AgentState
           from edge_router import EdgeRouteDecision, EdgeRouter, edge_router
           import main
@@ -59,10 +62,12 @@ jobs:
           print('Graph compiled OK:', app)
           "
 
-      - name: Run integration test suite
+      - name: Run integration test suite & architecture benchmarks
         env:
           DATABASE_URL: sqlite+aiosqlite:///./test.db
-        run: pytest -q test_auth_settings.py test_edge_router.py
+        run: |
+          pytest -v test_auth_settings.py test_edge_router.py test_architecture.py
+          python evals/benchmark_agentos.py
 
   # ── 2. Docker build check ───────────────────────────────────────────────────
   docker:
