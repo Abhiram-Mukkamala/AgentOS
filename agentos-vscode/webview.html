@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AgentOS Chat</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  
+  :root {
+    --bg:        #0d0f11;
+    --bg2:       #12151a;
+    --bg3:       #181c23;
+    --border:    #1e2530;
+    --border2:   #2a3340;
+    --text:      #c8d0dc;
+    --text-dim:  #5a6478;
+    --text-hi:   #e8edf5;
+    --accent:    #00d4aa;
+    --accent-blue: #4a7fff;
+    --accent-orange: #ff6b35;
+    --red:       #ff4d6a;
+    --green:     #00d4aa;
+    --yellow:    #ffd166;
+    --mono:      'JetBrains Mono', monospace;
+    --sans:      'Syne', sans-serif;
+    --radius:    6px;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Header ────────────────────────────────────────────────────────────── */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .title {
+    font-family: var(--sans);
+    font-weight: 800;
+    font-size: 14px;
+    color: var(--accent);
+    letter-spacing: -.5px;
+  }
+  .title span {
+    color: var(--text-dim);
+    font-weight: 400;
+  }
+  .status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* ── Chat Messages ─────────────────────────────────────────────────────── */
+  #chat-container {
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  #chat-container::-webkit-scrollbar {
+    width: 4px;
+  }
+  #chat-container::-webkit-scrollbar-thumb {
+    background: var(--border2);
+    border-radius: var(--radius);
+  }
+  
+  .message {
+    max-width: 90%;
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    line-height: 1.5;
+    word-wrap: break-word;
+    font-size: 12.5px;
+  }
+  .message.user {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    align-self: flex-end;
+    color: var(--text-hi);
+  }
+  .message.agent {
+    background: var(--bg2);
+    border: 1px solid var(--border2);
+    align-self: flex-start;
+  }
+  .message.error {
+    background: rgba(255, 77, 106, 0.08);
+    border: 1px solid var(--red);
+    color: var(--red);
+    align-self: center;
+    max-width: 100%;
+  }
+
+  .message strong {
+    color: var(--text-hi);
+  }
+  
+  /* Markdown styling inside messages */
+  .message p { margin-bottom: 8px; }
+  .message p:last-child { margin-bottom: 0; }
+  
+  .message pre {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    padding: 8px;
+    border-radius: 4px;
+    overflow-x: auto;
+    margin: 8px 0;
+    font-size: 11.5px;
+  }
+  .message code {
+    font-family: var(--mono);
+    color: var(--accent-blue);
+    background: rgba(74, 127, 255, 0.08);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  .message pre code {
+    background: transparent;
+    padding: 0;
+    color: var(--text);
+  }
+
+  .message ul, .message ol {
+    margin-left: 18px;
+    margin-bottom: 8px;
+  }
+
+  .file-link {
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: underline;
+  }
+  .file-link:hover {
+    color: var(--text-hi);
+  }
+
+  /* ── Input Box ─────────────────────────────────────────────────────────── */
+  #input-container {
+    padding: 10px 14px;
+    background: var(--bg2);
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .textarea-wrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .textarea-wrapper:focus-within {
+    border-color: var(--accent);
+  }
+  textarea {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text-hi);
+    font-family: var(--mono);
+    font-size: 12.5px;
+    padding: 10px;
+    resize: none;
+    max-height: 120px;
+  }
+  .btn-send {
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: color 0.15s;
+  }
+  .btn-send:hover {
+    color: var(--accent);
+  }
+  .btn-send svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  .footer-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .btn-clear {
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 11px;
+    transition: color 0.15s;
+  }
+  .btn-clear:hover {
+    color: var(--red);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="title">AgentOS <span>v2</span></div>
+  <div class="status">
+    <div class="status-dot"></div>
+    <span>Connected</span>
+  </div>
+</header>
+
+<div id="chat-container">
+  <div class="message agent">
+    <strong>AgentOS:</strong> Hello! I am the AgentOS orchestrator. I can coordinate specialized agents (Codex, Research, and DBAgent) to help you build, research, or log code snippet improvements. How can I help you today?
+  </div>
+</div>
+
+<div id="input-container">
+  <div class="textarea-wrapper">
+    <textarea id="chat-input" rows="1" placeholder="Type a message..."></textarea>
+    <button class="btn-send" id="btn-send" title="Send Message (Enter)">
+      <svg viewBox="0 0 24 24" fill="currentColor">
+        <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+      </svg>
+    </button>
+  </div>
+  <div class="footer-row">
+    <span>Press Enter to send, Shift+Enter for new line</span>
+    <button class="btn-clear" id="btn-clear">Wipe Memory</button>
+  </div>
+</div>
+
+<script>
+  const vscode = acquireVsCodeApi();
+  let currentThreadId = null;
+
+  const chatContainer = document.getElementById('chat-container');
+  const chatInput = document.getElementById('chat-input');
+  const btnSend = document.getElementById('btn-send');
+  const btnClear = document.getElementById('btn-clear');
+
+  // Load saved state if any
+  const previousState = vscode.getState();
+  if (previousState && previousState.chatHtml) {
+    chatContainer.innerHTML = previousState.chatHtml;
+    currentThreadId = previousState.threadId;
+    scrollToBottom();
+  }
+
+  // Handle auto-resize of textarea
+  chatInput.addEventListener('input', () => {
+    chatInput.style.height = 'auto';
+    chatInput.style.height = (chatInput.scrollHeight) + 'px';
+  });
+
+  // Handle Send
+  function sendMessage() {
+    const text = chatInput.value.trim();
+    if (!text) return;
+
+    // Append user message
+    appendMessage(text, 'user');
+    chatInput.value = '';
+    chatInput.style.height = 'auto';
+
+    // Show typing/pending state
+    appendMessage('Orchestrating agents... 🧠', 'agent pending');
+
+    vscode.postMessage({
+      type: 'sendMessage',
+      value: text,
+      threadId: currentThreadId
+    });
+    
+    scrollToBottom();
+  }
+
+  btnSend.addEventListener('click', sendMessage);
+
+  chatInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+
+  btnClear.addEventListener('click', () => {
+    vscode.postMessage({ type: 'clearSession' });
+    chatContainer.innerHTML = `
+      <div class="message agent">
+        <strong>AgentOS:</strong> 🧠 Memory Wiped. Starting fresh session.
+      </div>
+    `;
+    currentThreadId = null;
+    saveState();
+  });
+
+  // Message listener from extension host
+  window.addEventListener('message', event => {
+    const message = event.data;
+    switch (message.type) {
+      case 'addResponse': {
+        // Remove pending message
+        const pending = chatContainer.querySelector('.message.pending');
+        if (pending) pending.remove();
+
+        currentThreadId = message.threadId;
+        appendMessage(message.value, 'agent');
+        updateConnectionStatus(true);
+        saveState();
+        break;
+      }
+      case 'addError': {
+        const pending = chatContainer.querySelector('.message.pending');
+        if (pending) pending.remove();
+
+        appendMessage(message.value, 'error');
+        updateConnectionStatus(false);
+        saveState();
+        break;
+      }
+      case 'sessionCleared': {
+        currentThreadId = null;
+        saveState();
+        break;
+      }
+    }
+  });
+
+  function updateConnectionStatus(connected) {
+    const dot = document.querySelector('.status-dot');
+    const text = document.querySelector('.status span');
+    if (connected) {
+      dot.style.background = 'var(--green)';
+      dot.style.boxShadow = '0 0 8px var(--green)';
+      text.textContent = 'Connected';
+    } else {
+      dot.style.background = 'var(--red)';
+      dot.style.boxShadow = '0 0 8px var(--red)';
+      text.textContent = 'Disconnected';
+    }
+  }
+
+  function appendMessage(text, className) {
+    const div = document.createElement('div');
+    div.className = `message ${className}`;
+    
+    if (className.includes('user')) {
+      div.innerHTML = `<strong>You:</strong> ${escapeHtml(text)}`;
+    } else if (className.includes('error')) {
+      div.innerHTML = text; // friendly error is already markdown formatted
+    } else if (className.includes('pending')) {
+      div.innerHTML = text;
+    } else {
+      div.innerHTML = `<strong>AgentOS:</strong> ${parseMarkdown(text)}`;
+    }
+
+    chatContainer.appendChild(div);
+    scrollToBottom();
+  }
+
+  function scrollToBottom() {
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+  }
+
+  function saveState() {
+    vscode.setState({
+      chatHtml: chatContainer.innerHTML,
+      threadId: currentThreadId
+    });
+  }
+
+  function escapeHtml(unsafe) {
+    return unsafe
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
+  // Simple parser to display markdown and file links in webview
+  function parseMarkdown(text) {
+    let html = escapeHtml(text);
+    
+    // Code blocks with action buttons
+    html = html.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (match, lang, code) => {
+      const cleanLang = lang.trim() || 'code';
+      const plainCode = code.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#039;/g, "'");
+      const base64Code = btoa(unescape(encodeURIComponent(plainCode.trim())));
+      
+      return `
+        <div class="code-block-container" style="border: 1px solid var(--border); border-radius: var(--radius); margin: 12px 0; overflow: hidden; background: var(--bg2);">
+          <div class="code-block-header" style="display: flex; justify-content: space-between; align-items: center; padding: 6px 12px; background: var(--bg3); border-bottom: 1px solid var(--border); font-size: 11px; color: var(--text-dim);">
+            <span style="text-transform: uppercase; font-weight: 700; color: var(--accent-blue);">${cleanLang}</span>
+            <div style="display: flex; gap: 8px;">
+              <button onclick="insertAtCursor('${base64Code}')" style="background: transparent; border: none; color: var(--accent); cursor: pointer; font-family: var(--mono); font-size: 11px; font-weight: bold;">
+                ⚡ Insert
+              </button>
+              <button onclick="createFileFromCode('${base64Code}', '${cleanLang}')" style="background: transparent; border: none; color: var(--accent-orange); cursor: pointer; font-family: var(--mono); font-size: 11px; font-weight: bold;">
+                📄 New File
+              </button>
+              <button onclick="copyToClipboard('${base64Code}')" style="background: transparent; border: none; color: var(--text); cursor: pointer; font-family: var(--mono); font-size: 11px;">
+                📋 Copy
+              </button>
+            </div>
+          </div>
+          <pre style="margin: 0; border: none; border-radius: 0; padding: 10px; background: var(--bg); overflow-x: auto;"><code class="language-${cleanLang}">${code}</code></pre>
+        </div>
+      `;
+    });
+    
+    // Inline code
+    html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+    
+    // Bold
+    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+
+    // Bullet points
+    html = html.replace(/^\s*[-*]\s+(.*)$/gm, '<li>$1</li>');
+    html = html.replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>');
+
+    // Link matches for files
+    html = html.replace(/\[([^\]]+)\]\(file:\/\/\/([^)]+)\)/g, (match, label, filePath) => {
+      const cleanPath = decodeURIComponent(filePath).replace(/^\/[A-Za-z]:/, (m) => m.substring(1));
+      return `<span class="file-link" onclick="openFile('${cleanPath}')">${label}</span>`;
+    });
+
+    // Replace regular new lines with breaks (excluding inside pre/code containers)
+    html = html.split('\n').map(line => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('<div') || trimmed.startsWith('</div') || trimmed.startsWith('<pre') || trimmed.startsWith('</pre') || trimmed.startsWith('<code') || trimmed.startsWith('</code') || trimmed.startsWith('<span') || trimmed.startsWith('<button') || trimmed.startsWith('<li>') || trimmed.startsWith('<ul>') || trimmed.startsWith('</ul>')) {
+        return line;
+      }
+      return line + '<br>';
+    }).join('\n');
+
+    return html;
+  }
+
+  window.openFile = function(path) {
+    vscode.postMessage({
+      type: 'openFile',
+      path: path
+    });
+  };
+
+  window.insertAtCursor = function(base64Code) {
+    const code = decodeURIComponent(escape(atob(base64Code)));
+    vscode.postMessage({
+      type: 'insertCode',
+      value: code
+    });
+  };
+
+  window.createFileFromCode = function(base64Code, lang) {
+    const code = decodeURIComponent(escape(atob(base64Code)));
+    vscode.postMessage({
+      type: 'createFile',
+      value: code,
+      language: lang
+    });
+  };
+
+  window.copyToClipboard = function(base64Code) {
+    const code = decodeURIComponent(escape(atob(base64Code)));
+    navigator.clipboard.writeText(code).then(() => {
+      const notif = document.createElement('div');
+      notif.textContent = 'Copied to clipboard!';
+      notif.style.position = 'fixed';
+      notif.style.bottom = '20px';
+      notif.style.right = '20px';
+      notif.style.background = 'var(--accent)';
+      notif.style.color = '#0d0f11';
+      notif.style.padding = '6px 12px';
+      notif.style.borderRadius = 'var(--radius)';
+      notif.style.fontSize = '11px';
+      notif.style.fontWeight = 'bold';
+      notif.style.zIndex = '10000';
+      document.body.appendChild(notif);
+      setTimeout(() => notif.remove(), 2000);
+    });
+  };
+</script>
+</body>
+</html>

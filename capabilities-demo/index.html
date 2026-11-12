@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AgentOS v2 — Developer Intelligence Platform</title>
+
+<!-- Modern Premium Typography -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Outfit:wght@300;400;600;800;900&display=swap" rel="stylesheet">
+
+<style>
+/* ── Design Tokens & Reset ────────────────────────────────────────────────── */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:          #08090b;
+  --bg-panel:    #0e1116;
+  --bg-glass:    rgba(14, 17, 22, 0.7);
+  --border:      #1e2530;
+  --border-glow: #2a3547;
+  --text:        #c8d0dc;
+  --text-dim:    #5e6a82;
+  --text-hi:     #f0f4f9;
+  
+  --accent:      #00d4aa;      /* Mint Green */
+  --accent-glow: rgba(0, 212, 170, 0.15);
+  --blue:        #4a7fff;      /* Electric Blue */
+  --blue-glow:   rgba(74, 127, 255, 0.15);
+  --orange:      #ff6b35;      /* Tech Orange */
+  --red:         #ff4d6a;      /* Alert Red */
+  
+  --sans:        'Outfit', sans-serif;
+  --mono:        'JetBrains Mono', monospace;
+  --radius:      12px;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  overflow-x: hidden;
+  line-height: 1.6;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-glow); }
+
+/* ── Typography & Layout ──────────────────────────────────────────────────── */
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 40px 24px;
+}
+
+.hero {
+  text-align: center;
+  margin-bottom: 80px;
+  position: relative;
+}
+
+/* Background glows */
+.glow-left {
+  position: absolute;
+  top: -100px;
+  left: -200px;
+  width: 600px;
+  height: 600px;
+  background: radial-gradient(circle, rgba(74,127,255,0.08) 0%, rgba(0,0,0,0) 70%);
+  z-index: -1;
+  pointer-events: none;
+}
+.glow-right {
+  position: absolute;
+  top: -100px;
+  right: -200px;
+  width: 600px;
+  height: 600px;
+  background: radial-gradient(circle, rgba(0,212,170,0.08) 0%, rgba(0,0,0,0) 70%);
+  z-index: -1;
+  pointer-events: none;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 16px;
+  border-radius: 30px;
+  background: rgba(0, 212, 170, 0.08);
+  border: 1px solid rgba(0, 212, 170, 0.2);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  margin-bottom: 20px;
+}
+.badge-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 8px var(--accent); }
+  50% { opacity: 0.4; box-shadow: none; }
+}
+
+h1 {
+  font-size: clamp(38px, 5vw, 64px);
+  font-weight: 900;
+  letter-spacing: -1.5px;
+  line-height: 1.1;
+  color: var(--text-hi);
+  margin-bottom: 24px;
+}
+h1 span {
+  background: linear-gradient(135deg, var(--blue) 30%, var(--accent) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.lead {
+  font-size: clamp(16px, 2vw, 19px);
+  color: var(--text-dim);
+  max-width: 680px;
+  margin: 0 auto;
+}
+
+/* ── Grid Features ────────────────────────────────────────────────────────── */
+.features-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 24px;
+  margin-bottom: 80px;
+}
+
+.card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 32px;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  position: relative;
+  overflow: hidden;
+}
+.card:hover {
+  transform: translateY(-4px);
+  border-color: var(--border-glow);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.25);
+}
+.card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, transparent);
+  transition: all 0.25s;
+}
+.card:hover::before {
+  background: linear-gradient(90deg, var(--blue), var(--accent));
+}
+
+.card-icon {
+  font-size: 32px;
+  margin-bottom: 20px;
+  display: inline-block;
+}
+
+.card h3 {
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--text-hi);
+  margin-bottom: 12px;
+}
+
+.card p {
+  font-size: 14px;
+  color: var(--text-dim);
+}
+
+.card-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 700;
+  margin-top: 20px;
+  transition: gap 0.2s;
+}
+.card:hover .card-link {
+  gap: 10px;
+}
+
+/* ── Interactive Playground ───────────────────────────────────────────────── */
+.playground-section {
+  margin-bottom: 80px;
+}
+
+.section-header {
+  text-align: center;
+  margin-bottom: 48px;
+}
+
+.section-header h2 {
+  font-size: 32px;
+  font-weight: 800;
+  color: var(--text-hi);
+  margin-bottom: 12px;
+}
+
+.playground-container {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 40px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 40px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+}
+
+@media (max-width: 900px) {
+  .playground-container {
+    grid-template-columns: 1fr;
+  }
+}
+
+.control-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.control-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.control-group label {
+  font-size: 11px;
+  text-transform: uppercase;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+}
+
+.btn-group {
+  display: flex;
+  gap: 12px;
+}
+
+.btn-toggle {
+  flex: 1;
+  background: #151921;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-toggle:hover {
+  border-color: var(--text-dim);
+}
+.btn-toggle.active {
+  background: rgba(74, 127, 255, 0.1);
+  border-color: var(--blue);
+  color: var(--text-hi);
+  box-shadow: 0 0 12px rgba(74, 127, 255, 0.15);
+}
+
+.input-text {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-hi);
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: 12px 16px;
+  outline: none;
+}
+.input-text:focus {
+  border-color: var(--accent);
+}
+
+.action-btn {
+  background: var(--accent);
+  color: #08090b;
+  font-family: var(--sans);
+  font-weight: 700;
+  font-size: 14px;
+  border: none;
+  border-radius: var(--radius);
+  padding: 14px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.action-btn:hover {
+  opacity: 0.85;
+}
+
+/* ── Live UI Simulator Preview ────────────────────────────────────────────── */
+.simulator-preview {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.sim-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+.sim-title {
+  font-family: var(--sans);
+  font-weight: 800;
+  font-size: 12px;
+  color: var(--accent);
+}
+.sim-title span {
+  color: var(--text-dim);
+}
+.sim-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.sim-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.sim-body {
+  padding: 24px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 280px;
+}
+
+.sim-modal {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: modalEnter 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes modalEnter {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.sim-modal-title {
+  font-family: var(--sans);
+  font-weight: 800;
+  font-size: 15px;
+  color: var(--text-hi);
+}
+.sim-input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sim-input-group label {
+  font-size: 9px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.sim-input {
+  background: var(--bg);
+  border: 1px solid var(--border2);
+  border-radius: 4px;
+  padding: 6px 10px;
+  color: var(--text-hi);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.sim-btn {
+  background: var(--accent);
+  color: #000;
+  border: none;
+  font-weight: 700;
+  padding: 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.sim-budget-container {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sim-budget-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.sim-progress-bg {
+  width: 100%;
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.sim-progress-bar {
+  height: 100%;
+  width: 25%;
+  background: linear-gradient(90deg, var(--blue), var(--accent));
+  transition: width 0.3s ease;
+}
+
+/* ── Code Display block ───────────────────────────────────────────────────── */
+.code-container {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg-panel);
+}
+.code-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 16px;
+  background: #12151b;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.code-header span {
+  font-family: var(--mono);
+}
+.code-body {
+  padding: 20px;
+  overflow-x: auto;
+}
+.code-body pre {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+/* ── Footer ───────────────────────────────────────────────────────────────── */
+footer {
+  text-align: center;
+  padding: 60px 0;
+  border-top: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+</style>
+</head>
+<body>
+
+<div class="container">
+  
+  <!-- Glows -->
+  <div class="glow-left"></div>
+  <div class="glow-right"></div>
+
+  <!-- Hero Section -->
+  <div class="hero">
+    <div class="badge">
+      <span class="badge-dot"></span>
+      <span>AgentOS Engine v2.0 Active</span>
+    </div>
+    <h1>Build Smarter with <span>AgentOS</span></h1>
+    <p class="lead">
+      A premium multi-agent developer environment inside VS Code. Backed by isolated client environments, token limit fallbacks, and real-time key testing.
+    </p>
+  </div>
+
+  <!-- Capabilities Grid -->
+  <div class="features-grid">
+    
+    <!-- Feature 1: Multi-User auth -->
+    <div class="card">
+      <span class="card-icon">🔑</span>
+      <h3>Multi-Tenant Isolation</h3>
+      <p>
+        Clean client isolation with PBKDF2 cryptography password hashing and JWT authorization token sessions. Scope snippets, history, and workspace files per-user.
+      </p>
+    </div>
+
+    <!-- Feature 2: Interactive Settings -->
+    <div class="card">
+      <span class="card-icon">⚙️</span>
+      <h3>Interactive Settings</h3>
+      <p>
+        Synchronize active modes (Paid, Free, Local), set active token budgets, and test credentials live. Displays thread context sizes and database pruning actions.
+      </p>
+    </div>
+
+    <!-- Feature 3: API Key Verification -->
+    <div class="card">
+      <span class="card-icon">⚡</span>
+      <h3>Live Key Validators</h3>
+      <p>
+        Test credentials on save. Sends a single-token probe HTTP request to OpenAI, Anthropic, or Gemini and displays verification feedback indicators.
+      </p>
+    </div>
+
+    <!-- Feature 4: Memory fallbacks -->
+    <div class="card">
+      <span class="card-icon">🧠</span>
+      <h3>Token Limit Fallbacks</h3>
+      <p>
+        Tracks used API tokens against your budget with visual gauges. Automatically switches model chains to the Local Codex engine upon budget exhaustion.
+      </p>
+    </div>
+
+    <!-- Feature 5: Dynamic i18n -->
+    <div class="card">
+      <span class="card-icon">🌐</span>
+      <h3>i18n Localization</h3>
+      <p>
+        Dynamic translation catalog mapping using locales catalogs. Connect to Babelize.co to automatically sync Spanish, French, or German pull requests.
+      </p>
+    </div>
+
+    <!-- Feature 6: Watchdog Daemon -->
+    <div class="card">
+      <span class="card-icon">🐕</span>
+      <h3>Uptime Watchdog</h3>
+      <p>
+        Includes a local watchdog service `keep_online.bat` checking port 8080 uptime and auto-restarting the FastAPI Gateway if it falls offline.
+      </p>
+    </div>
+
+  </div>
+
+  <!-- Interactive Sandbox Simulator -->
+  <div class="playground-section">
+    <div class="section-header">
+      <h2>Interactive Capabilities Sandbox</h2>
+      <p style="color:var(--text-dim)">Click control actions to simulate backend behaviors and observe UI preview responses.</p>
+    </div>
+
+    <div class="playground-container">
+      
+      <!-- Interactive Simulator Controls -->
+      <div class="control-panel">
+        
+        <div class="control-group">
+          <label>1. Toggle Authentication State</label>
+          <div class="btn-group">
+            <button class="btn-toggle active" id="btn-state-unauth" onclick="simSetAuthState('unauth')">Show Login Form</button>
+            <button class="btn-toggle" id="btn-state-auth" onclick="simSetAuthState('auth')">Authorized App State</button>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <label>2. Live API Key testing Probe</label>
+          <div class="btn-group">
+            <button class="btn-toggle" onclick="simTestKey('valid')">Test Valid OpenAI Key</button>
+            <button class="btn-toggle" onclick="simTestKey('invalid')">Test Invalid Key</button>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <label>3. Token Budget Simulator</label>
+          <div class="btn-group">
+            <button class="btn-toggle" onclick="simUseTokens(35000)">Consume 35,000 Tokens</button>
+            <button class="btn-toggle" onclick="simUseTokens(100000)">Exhaust Budget (Fallback)</button>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <label>4. Local Context Tuner Size</label>
+          <div class="btn-group">
+            <button class="btn-toggle" onclick="simPruneContext()">Prune Context</button>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Live UI Simulator Preview -->
+      <div class="simulator-preview">
+        
+        <div class="sim-header">
+          <div class="sim-title">AgentOS <span>v2</span></div>
+          <div class="sim-status">
+            <div class="sim-status-dot"></div>
+            <span>Connected</span>
+          </div>
+        </div>
+
+        <!-- Simulator body -->
+        <div class="sim-body" id="sim-view-body">
+          
+          <!-- Auth Modal Mode (unauth) -->
+          <div class="sim-modal" id="sim-element-auth">
+            <div class="sim-modal-title">Log In</div>
+            <div class="sim-input-group">
+              <label>Username</label>
+              <input type="text" class="sim-input" value="developer_guest" readonly />
+            </div>
+            <div class="sim-input-group">
+              <label>Password</label>
+              <input type="password" class="sim-input" value="••••••••••••" readonly />
+            </div>
+            <button class="sim-btn" onclick="simSetAuthState('auth')">Login</button>
+          </div>
+
+          <!-- Main Panel View (auth) -->
+          <div id="sim-element-main" style="display:none; flex-direction:column; gap:16px;">
+            <div style="font-size:12px; font-weight:700; color:var(--text-hi);">⚙️ System Configuration</div>
+            
+            <div class="sim-budget-container">
+              <div class="sim-budget-row">
+                <span>Used Tokens</span>
+                <span id="sim-budget-text">25,000 / 100,000</span>
+              </div>
+              <div class="sim-progress-bg">
+                <div class="sim-progress-bar" id="sim-progress-bar"></div>
+              </div>
+            </div>
+
+            <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--text-dim)">
+              <span>Active Mode:</span>
+              <span id="sim-active-mode" style="color:var(--accent); font-weight:700;">Paid Cloud API</span>
+            </div>
+
+            <div class="sim-input-group" id="sim-key-tester-row">
+              <label>OpenAI API Key validation check</label>
+              <div style="display:flex; gap:8px; align-items:center;">
+                <input type="text" class="sim-input" style="flex:1" value="sk-proj-••••••••••••" readonly />
+                <span id="sim-key-status" style="font-size:12px; font-weight:bold; color:var(--accent)">✓</span>
+              </div>
+            </div>
+
+            <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--text-dim)">
+              <span>Context size:</span>
+              <span id="sim-context-size" style="color:var(--text-hi)">1,420 tokens</span>
+            </div>
+
+            <div id="sim-warning-banner" style="display:none; padding:8px 12px; background:rgba(255, 77, 106, 0.1); border:1px dashed var(--red); border-radius:4px; font-size:11px; color:var(--red);">
+              ⚠️ Warning: Budget limit exhausted. Falling back to Local Codex.
+            </div>
+
+          </div>
+
+        </div>
+
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Showcase Integration details -->
+  <div style="margin-bottom:80px;">
+    <div class="section-header">
+      <h2>Integrated Watchdog service</h2>
+      <p style="color:var(--text-dim)">Run `keep_online.bat` on Windows hosts to ensure maximum FastAPI server availability.</p>
+    </div>
+    
+    <div class="code-container">
+      <div class="code-header">
+        <span>keep_online.bat</span>
+        <span>Windows Batch</span>
+      </div>
+      <div class="code-body">
+        <pre><code>@echo off
+title AgentOS Watchdog & Keep-Alive Service
+echo Monitoring FastAPI server at http://127.0.0.1:8080/health
+
+:loop
+netstat -ano | findstr LISTENING | findstr :8080 >nul
+if %errorlevel% equ 0 (
+    echo [%date% %time%] Server is online and listening on port 8080.
+) else (
+    echo [%date% %time%] WARNING: FastAPI server is OFFLINE! Restarting it now...
+    start /b python main.py
+    timeout /t 5 >nul
+)
+timeout /t 30 >nul
+goto loop</code></pre>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<footer>
+  AgentOS Intelligence Suite · 2026
+</footer>
+
+<!-- Sandbox Simulator Script -->
+<script>
+  let tokensUsed = 25000;
+  let budgetLimit = 100000;
+  let authState = 'unauth';
+  let mode = 'paid';
+
+  function simSetAuthState(state) {
+    authState = state;
+    const authEl = document.getElementById('sim-element-auth');
+    const mainEl = document.getElementById('sim-element-main');
+    const btnUnauth = document.getElementById('btn-state-unauth');
+    const btnAuth = document.getElementById('btn-state-auth');
+    const statusDot = document.querySelector('.sim-status-dot');
+
+    if (state === 'unauth') {
+      authEl.style.display = 'flex';
+      mainEl.style.display = 'none';
+      btnUnauth.classList.add('active');
+      btnAuth.classList.remove('active');
+      statusDot.style.background = 'var(--text-dim)';
+    } else {
+      authEl.style.display = 'none';
+      mainEl.style.display = 'flex';
+      btnUnauth.classList.remove('active');
+      btnAuth.classList.add('active');
+      statusDot.style.background = 'var(--accent)';
+    }
+  }
+
+  function simTestKey(result) {
+    if (authState === 'unauth') {
+      alert("Please authorize the app first to test key validations.");
+      return;
+    }
+    const statusEl = document.getElementById('sim-key-status');
+    statusEl.textContent = 'testing...';
+    statusEl.style.color = 'var(--yellow)';
+    
+    setTimeout(() => {
+      if (result === 'valid') {
+        statusEl.textContent = '✓';
+        statusEl.style.color = 'var(--accent)';
+      } else {
+        statusEl.textContent = '✗';
+        statusEl.style.color = 'var(--red)';
+      }
+    }, 800);
+  }
+
+  function simUseTokens(amount) {
+    if (authState === 'unauth') {
+      alert("Please authorize the app first.");
+      return;
+    }
+    tokensUsed = amount;
+    
+    const textEl = document.getElementById('sim-budget-text');
+    const progressEl = document.getElementById('sim-progress-bar');
+    const warningEl = document.getElementById('sim-warning-banner');
+    const modeEl = document.getElementById('sim-active-mode');
+
+    textEl.textContent = `${tokensUsed.toLocaleString()} / ${budgetLimit.toLocaleString()}`;
+    const pct = (tokensUsed / budgetLimit) * 100;
+    progressEl.style.width = pct + '%';
+
+    if (tokensUsed >= budgetLimit) {
+      warningEl.style.display = 'block';
+      modeEl.textContent = 'Local Codex Model';
+      modeEl.style.color = 'var(--accent-orange)';
+    } else {
+      warningEl.style.display = 'none';
+      modeEl.textContent = 'Paid Cloud API';
+      modeEl.style.color = 'var(--accent)';
+    }
+  }
+
+  function simPruneContext() {
+    if (authState === 'unauth') {
+      alert("Please authorize the app first.");
+      return;
+    }
+    const contextEl = document.getElementById('sim-context-size');
+    contextEl.textContent = '420 tokens';
+    
+    const notif = document.createElement('div');
+    notif.textContent = 'Context pruned and archived successfully!';
+    notif.style.position = 'fixed';
+    notif.style.bottom = '20px';
+    notif.style.left = '50%';
+    notif.style.transform = 'translateX(-50%)';
+    notif.style.background = 'var(--accent)';
+    notif.style.color = '#0d0f11';
+    notif.style.padding = '8px 16px';
+    notif.style.borderRadius = 'var(--radius)';
+    notif.style.fontSize = '12px';
+    notif.style.fontWeight = 'bold';
+    notif.style.zIndex = '1000';
+    document.body.appendChild(notif);
+    setTimeout(() => notif.remove(), 2500);
+  }
+</script>
+
+</body>
+</html>

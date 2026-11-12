@@ -1,0 +1,1615 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AgentOS — Developer Intelligence</title>
+<meta name="description" content="AgentOS: AI-powered developer productivity hub with multi-agent code review, research, and persistent memory." />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet" />
+
+<!-- Monaco Editor -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs/loader.min.js"></script>
+
+<style>
+/* ── Reset & tokens ─────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:        #0d0f11;
+  --bg2:       #12151a;
+  --bg3:       #181c23;
+  --border:    #1e2530;
+  --border2:   #2a3340;
+  --text:      #c8d0dc;
+  --text-dim:  #5a6478;
+  --text-hi:   #e8edf5;
+  --accent:    #00d4aa;
+  --accent2:   #4a7fff;
+  --accent3:   #ff6b35;
+  --red:       #ff4d6a;
+  --green:     #00d4aa;
+  --yellow:    #ffd166;
+  --mono:      'JetBrains Mono', monospace;
+  --sans:      'Syne', sans-serif;
+  --radius:    6px;
+  --panel:     320px;
+  --chat:      360px;
+}
+
+html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 13px; }
+
+/* ── Layout ─────────────────────────────────────────────────────────────── */
+#app { display: grid; grid-template-rows: 44px 1fr; grid-template-columns: 48px 1fr var(--panel); height: 100vh; }
+
+/* ── Topbar ─────────────────────────────────────────────────────────────── */
+#topbar {
+  grid-column: 1 / -1;
+  display: flex; align-items: center; gap: 16px;
+  padding: 0 16px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+}
+.logo { font-family: var(--sans); font-weight: 800; font-size: 15px; color: var(--accent); letter-spacing: -.5px; white-space: nowrap; }
+.logo span { color: var(--text-dim); font-weight: 400; }
+.topbar-spacer { flex: 1; }
+.tab-bar { display: flex; gap: 2px; }
+.tab {
+  padding: 6px 14px; font-family: var(--mono); font-size: 12px; cursor: pointer;
+  border-radius: var(--radius) var(--radius) 0 0;
+  border: 1px solid transparent; border-bottom: none;
+  color: var(--text-dim); background: transparent; transition: all .15s;
+}
+.tab.active { color: var(--text-hi); background: var(--bg); border-color: var(--border); }
+.tab:hover:not(.active) { color: var(--text); }
+.status-pill {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 20px;
+  background: var(--bg3); border: 1px solid var(--border2);
+  font-size: 11px; color: var(--text-dim);
+}
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.4; } }
+.btn-sm {
+  padding: 5px 12px; border-radius: var(--radius); border: 1px solid var(--border2);
+  background: transparent; color: var(--text); font-family: var(--mono); font-size: 12px;
+  cursor: pointer; transition: all .15s;
+}
+.btn-sm:hover { border-color: var(--accent); color: var(--accent); }
+.btn-run {
+  padding: 5px 14px; border-radius: var(--radius);
+  background: var(--accent); border: none; color: #0d0f11;
+  font-family: var(--mono); font-size: 12px; font-weight: 700;
+  cursor: pointer; transition: opacity .15s;
+}
+.btn-run:hover { opacity: .85; }
+.btn-run:disabled { opacity: .4; cursor: not-allowed; }
+
+/* ── Activity bar ───────────────────────────────────────────────────────── */
+#activitybar {
+  background: var(--bg2); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; align-items: center;
+  padding: 8px 0; gap: 4px;
+}
+.act-btn {
+  width: 36px; height: 36px; display: flex; align-items: center; justify-content: center;
+  border-radius: var(--radius); cursor: pointer; color: var(--text-dim);
+  background: transparent; transition: all .15s; font-size: 16px; border: none;
+  position: relative;
+}
+.act-btn.active, .act-btn:hover { color: var(--accent); background: var(--bg3); }
+.act-btn .tooltip {
+  position: absolute; left: 44px; background: var(--bg3); border: 1px solid var(--border2);
+  color: var(--text-hi); padding: 4px 8px; border-radius: var(--radius);
+  font-size: 11px; white-space: nowrap; pointer-events: none;
+  opacity: 0; transition: opacity .15s; z-index: 100;
+}
+.act-btn:hover .tooltip { opacity: 1; }
+
+/* ── Main editor area ───────────────────────────────────────────────────── */
+#main-area {
+  display: flex; flex-direction: column; overflow: hidden;
+  border-right: 1px solid var(--border);
+}
+
+/* File tabs */
+#file-tabs {
+  display: flex; align-items: center; gap: 0;
+  background: var(--bg2); border-bottom: 1px solid var(--border);
+  height: 36px; overflow-x: auto;
+}
+#file-tabs::-webkit-scrollbar { height: 2px; }
+#file-tabs::-webkit-scrollbar-thumb { background: var(--border2); }
+.file-tab {
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 14px; height: 36px; white-space: nowrap;
+  cursor: pointer; border-right: 1px solid var(--border);
+  color: var(--text-dim); font-size: 12px; transition: all .1s;
+  background: transparent;
+}
+.file-tab.active { color: var(--text-hi); background: var(--bg); border-top: 1px solid var(--accent); }
+.file-tab-close { opacity: 0; font-size: 14px; line-height: 1; cursor: pointer; }
+.file-tab:hover .file-tab-close { opacity: 1; }
+.file-tab-dot { color: var(--accent3); font-size: 10px; }
+
+/* Editor */
+#editor-wrapper { flex: 1; position: relative; }
+#monaco-editor { position: absolute; inset: 0; }
+
+/* Output terminal */
+#output-panel {
+  height: 0; overflow: hidden; transition: height .2s ease;
+  background: var(--bg2); border-top: 1px solid var(--border);
+  display: flex; flex-direction: column;
+}
+#output-panel.open { height: 200px; }
+.output-header {
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+  border-bottom: 1px solid var(--border); flex-shrink: 0;
+  font-size: 11px; color: var(--text-dim);
+}
+.output-header strong { color: var(--text); font-size: 12px; }
+.output-clear { margin-left: auto; cursor: pointer; }
+.output-clear:hover { color: var(--accent); }
+#output-content {
+  flex: 1; overflow-y: auto; padding: 10px 14px;
+  font-size: 12px; line-height: 1.7; white-space: pre-wrap;
+  color: var(--text);
+}
+#output-content.err { color: var(--red); }
+#output-content::-webkit-scrollbar { width: 4px; }
+#output-content::-webkit-scrollbar-thumb { background: var(--border2); }
+
+/* ── Right sidebar ──────────────────────────────────────────────────────── */
+#sidebar {
+  background: var(--bg2); display: flex; flex-direction: column; overflow: hidden;
+}
+
+/* Agent status */
+#agent-status {
+  padding: 12px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.sidebar-title { font-family: var(--sans); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1.5px; color: var(--text-dim); margin-bottom: 10px; }
+.agent-row {
+  display: flex; align-items: center; gap: 8px; padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.agent-row:last-child { border-bottom: none; }
+.agent-icon { font-size: 16px; width: 24px; text-align: center; }
+.agent-info { flex: 1; }
+.agent-name { color: var(--text-hi); font-size: 12px; }
+.agent-desc { color: var(--text-dim); font-size: 10px; margin-top: 1px; }
+.agent-badge {
+  font-size: 10px; padding: 2px 7px; border-radius: 20px;
+  background: var(--bg3); border: 1px solid var(--border2); color: var(--text-dim);
+}
+.agent-badge.active { background: rgba(0,212,170,.12); border-color: var(--accent); color: var(--accent); }
+.agent-badge.done   { background: rgba(0,212,170,.06); border-color: transparent; color: var(--text-dim); }
+
+/* Panel tabs */
+#panel-tabs {
+  display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.panel-tab {
+  flex: 1; padding: 9px 0; text-align: center; cursor: pointer;
+  font-size: 11px; color: var(--text-dim); border-bottom: 2px solid transparent;
+  transition: all .15s; background: transparent; border-top: none; border-left: none; border-right: none;
+}
+.panel-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.panel-tab:hover:not(.active) { color: var(--text); }
+
+/* Chat */
+#chat-panel {
+  flex: 1; display: none; flex-direction: column; overflow: hidden;
+}
+#chat-panel.visible { display: flex; }
+#chat-messages {
+  flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px;
+}
+#chat-messages::-webkit-scrollbar { width: 4px; }
+#chat-messages::-webkit-scrollbar-thumb { background: var(--border2); }
+.msg {
+  max-width: 92%; border-radius: 8px; padding: 9px 12px;
+  font-size: 12px; line-height: 1.65; animation: fadeUp .2s ease;
+}
+@keyframes fadeUp { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+.msg.user  { align-self: flex-end; background: var(--accent2); color: #fff; border-bottom-right-radius: 2px; }
+.msg.agent { align-self: flex-start; background: var(--bg3); color: var(--text); border-bottom-left-radius: 2px; border: 1px solid var(--border); }
+.msg.thinking { color: var(--text-dim); font-style: italic; border-style: dashed; }
+.msg pre { margin-top: 8px; background: var(--bg); border-radius: 4px; padding: 8px; overflow-x: auto; font-size: 11px; }
+.msg code { background: var(--bg); border-radius: 3px; padding: 1px 4px; font-size: 11px; }
+.msg-meta { font-size: 10px; color: var(--text-dim); margin-top: 4px; display: flex; gap: 8px; }
+.agent-tag { color: var(--accent); }
+#chat-input-area {
+  padding: 10px; border-top: 1px solid var(--border); flex-shrink: 0;
+  display: flex; flex-direction: column; gap: 6px;
+}
+#chat-input {
+  width: 100%; background: var(--bg3); border: 1px solid var(--border2);
+  border-radius: var(--radius); color: var(--text-hi); font-family: var(--mono);
+  font-size: 12px; padding: 8px 10px; resize: none; outline: none; line-height: 1.5;
+}
+#chat-input:focus { border-color: var(--accent); }
+.chat-actions { display: flex; gap: 6px; align-items: center; }
+.chat-hint { font-size: 10px; color: var(--text-dim); flex: 1; }
+#send-btn {
+  padding: 6px 14px; border-radius: var(--radius); border: none;
+  background: var(--accent); color: #0d0f11; font-family: var(--mono);
+  font-size: 12px; font-weight: 700; cursor: pointer; transition: opacity .15s;
+}
+#send-btn:hover { opacity: .85; }
+#send-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+/* Snippets panel */
+#snippets-panel {
+  flex: 1; display: none; flex-direction: column; overflow: hidden;
+}
+#snippets-panel.visible { display: flex; }
+#snippets-search {
+  margin: 10px; background: var(--bg3); border: 1px solid var(--border2);
+  border-radius: var(--radius); color: var(--text-hi); font-family: var(--mono);
+  font-size: 12px; padding: 7px 10px; outline: none;
+}
+#snippets-search:focus { border-color: var(--accent); }
+#snippets-list { flex: 1; overflow-y: auto; padding: 0 10px 10px; }
+#snippets-list::-webkit-scrollbar { width: 4px; }
+#snippets-list::-webkit-scrollbar-thumb { background: var(--border2); }
+.snippet-card {
+  background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 10px; margin-bottom: 8px; cursor: pointer; transition: border-color .15s;
+}
+.snippet-card:hover { border-color: var(--accent2); }
+.snippet-title { color: var(--text-hi); font-size: 12px; font-weight: 500; }
+.snippet-meta  { color: var(--text-dim); font-size: 10px; margin-top: 3px; }
+.snippet-tags  { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+.snippet-tag {
+  font-size: 10px; padding: 1px 7px; border-radius: 20px;
+  background: rgba(74,127,255,.1); border: 1px solid rgba(74,127,255,.25); color: var(--accent2);
+}
+.snippet-actions { display: flex; gap: 6px; margin-top: 8px; }
+.snippet-btn {
+  font-size: 10px; padding: 3px 8px; border-radius: var(--radius);
+  border: 1px solid var(--border2); background: transparent;
+  color: var(--text-dim); cursor: pointer; transition: all .1s; font-family: var(--mono);
+}
+.snippet-btn:hover { color: var(--accent); border-color: var(--accent); }
+.snippet-btn.del:hover { color: var(--red); border-color: var(--red); }
+.empty-state { color: var(--text-dim); font-size: 12px; text-align: center; padding: 24px 0; }
+
+/* Thread ID bar */
+.thread-bar {
+  padding: 6px 10px; font-size: 10px; color: var(--text-dim);
+  border-top: 1px solid var(--border); display: flex; align-items: center; gap: 6px;
+  flex-shrink: 0;
+}
+.thread-id { font-family: var(--mono); color: var(--text-dim); }
+.new-thread-btn { margin-left: auto; cursor: pointer; background: none; border: none; color: var(--text-dim); font-family: var(--mono); font-size: 10px; }
+.new-thread-btn:hover { color: var(--accent); }
+
+/* Scrollbar global */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
+
+/* ── Auth Modal ────────────────────────────────────────────────────────── */
+#auth-overlay {
+  position: fixed; inset: 0; background: rgba(13,15,17,0.85); backdrop-filter: blur(16px);
+  display: flex; align-items: center; justify-content: center; z-index: 1000;
+  transition: opacity .3s ease; opacity: 1; pointer-events: auto;
+}
+#auth-overlay.hidden { opacity: 0; pointer-events: none; }
+.auth-box {
+  width: 360px; background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
+  padding: 32px 24px; box-shadow: 0 20px 50px rgba(0,0,0,0.5); display: flex; flex-direction: column; gap: 16px;
+  position: relative;
+}
+.auth-header { text-align: center; margin-bottom: 8px; }
+.auth-title { font-family: var(--sans); font-size: 20px; font-weight: 800; color: var(--accent); }
+.auth-subtitle { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+.auth-input-group { display: flex; flex-direction: column; gap: 6px; }
+.auth-input-group label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; }
+.auth-input {
+  background: var(--bg3); border: 1px solid var(--border2); border-radius: var(--radius);
+  color: var(--text-hi); font-family: var(--mono); font-size: 12px; padding: 8px 12px; outline: none;
+}
+.auth-input:focus { border-color: var(--accent); }
+.auth-btn {
+  background: var(--accent); border: none; border-radius: var(--radius); color: #0d0f11;
+  font-family: var(--mono); font-size: 12px; font-weight: 700; padding: 10px; cursor: pointer;
+  transition: opacity .15s;
+}
+.auth-btn:hover { opacity: .85; }
+.auth-toggle { font-size: 11px; text-align: center; color: var(--text-dim); cursor: pointer; margin-top: 8px; }
+.auth-toggle span { color: var(--accent2); text-decoration: underline; }
+
+/* ── Settings Modal ────────────────────────────────────────────────────── */
+#settings-overlay {
+  position: fixed; inset: 0; background: rgba(13,15,17,0.7); backdrop-filter: blur(8px);
+  display: flex; align-items: center; justify-content: center; z-index: 900;
+  transition: opacity .2s ease; opacity: 0; pointer-events: none;
+}
+#settings-overlay.open { opacity: 1; pointer-events: auto; }
+.settings-box {
+  width: 520px; max-height: 85vh; overflow-y: auto; background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 12px; padding: 28px 24px; box-shadow: 0 15px 40px rgba(0,0,0,0.5);
+  display: flex; flex-direction: column; gap: 20px;
+}
+.settings-section { display: flex; flex-direction: column; gap: 10px; border-bottom: 1px solid var(--border); padding-bottom: 16px; }
+.settings-section:last-child { border-bottom: none; padding-bottom: 0; }
+.settings-sec-title { font-family: var(--sans); font-size: 12px; font-weight: 600; text-transform: uppercase; color: var(--text-dim); letter-spacing: 1px; }
+.settings-row-input { display: flex; align-items: center; gap: 12px; }
+.settings-row-input label { flex: 1; color: var(--text); }
+.settings-select, .settings-text {
+  background: var(--bg3); border: 1px solid var(--border2); border-radius: var(--radius);
+  color: var(--text-hi); font-family: var(--mono); font-size: 12px; padding: 6px 10px; outline: none;
+}
+.settings-text { width: 100%; }
+.settings-checkbox-group { display: flex; gap: 16px; flex-wrap: wrap; }
+.settings-checkbox { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.key-input-container { display: grid; grid-template-columns: 1fr 80px 80px; gap: 8px; align-items: center; }
+.btn-test-key {
+  padding: 6px 10px; border-radius: var(--radius); border: 1px solid var(--border2);
+  background: var(--bg3); color: var(--text); font-family: var(--mono); font-size: 11px; cursor: pointer; transition: all .15s;
+}
+.btn-test-key:hover { border-color: var(--accent2); color: var(--accent2); }
+.key-status { font-size: 11px; text-align: center; }
+.key-status.valid { color: var(--green); }
+.key-status.invalid { color: var(--red); }
+.key-status.testing { color: var(--yellow); }
+
+.progress-bar-container { width: 100%; height: 8px; background: var(--bg3); border-radius: 4px; overflow: hidden; margin-top: 4px; }
+.progress-bar { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent2), var(--accent)); transition: width .3s ease; }
+
+.settings-btn-group { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.settings-actions-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+.btn-danger {
+  padding: 8px; border-radius: var(--radius); border: 1px solid var(--red); background: transparent;
+  color: var(--red); font-family: var(--mono); font-size: 11px; cursor: pointer; transition: all .15s;
+}
+.btn-danger:hover { background: rgba(255,77,106,0.1); }
+</style>
+</head>
+<body>
+
+  <!-- Auth Overlay -->
+  <div id="auth-overlay">
+    <div class="auth-box">
+      <div class="auth-header">
+        <div class="auth-title" id="auth-title-text" data-i18n="auth_login">Log In</div>
+        <div class="auth-subtitle" id="auth-subtitle-text" data-i18n="auth_welcome">Welcome back! Please authenticate to access AgentOS.</div>
+      </div>
+      <div class="auth-input-group">
+        <label for="auth-user" data-i18n="auth_username">Username</label>
+        <input type="text" id="auth-user" class="auth-input" data-i18n="auth_username" placeholder="Username" />
+      </div>
+      <div class="auth-input-group">
+        <label for="auth-pass" data-i18n="auth_password">Password</label>
+        <input type="password" id="auth-pass" class="auth-input" data-i18n="auth_password" placeholder="Password" onkeydown="handleAuthKey(event)" />
+      </div>
+      <button class="auth-btn" id="auth-submit-btn" onclick="handleAuthSubmit()" data-i18n="auth_btn_login">Login</button>
+      <div class="auth-toggle" onclick="toggleAuthMode()">
+        <span id="auth-toggle-text" data-i18n="auth_register">Register a new developer profile.</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Overlay -->
+  <div id="settings-overlay">
+    <div class="settings-box">
+      <h2 style="font-family:var(--sans);font-weight:800;color:var(--accent);" data-i18n="settings_title">System Settings</h2>
+      
+      <!-- Interface Language -->
+      <div class="settings-section">
+        <div class="settings-sec-title" data-i18n="settings_lbl_lang">Interface Language</div>
+        <div class="settings-row-input">
+          <select id="settings-lang" class="settings-select" style="width:100%;" onchange="changeLanguage(this.value)">
+            <option value="en">English (US)</option>
+            <option value="es">Español (ES)</option>
+            <option value="fr">Français (FR)</option>
+            <option value="de">Deutsch (DE)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Mode selection -->
+      <div class="settings-section">
+        <div class="settings-sec-title" data-i18n="settings_mode">API Mode</div>
+        <div class="settings-checkbox-group">
+          <label class="settings-checkbox">
+            <input type="radio" name="api-mode" value="paid" onchange="toggleModeSections()" />
+            <span data-i18n="settings_mode_paid">Paid Cloud API</span>
+          </label>
+          <label class="settings-checkbox">
+            <input type="radio" name="api-mode" value="free" onchange="toggleModeSections()" />
+            <span data-i18n="settings_mode_free">Free Web models</span>
+          </label>
+          <label class="settings-checkbox">
+            <input type="radio" name="api-mode" value="local" onchange="toggleModeSections()" />
+            <span data-i18n="settings_mode_local">Local Codex Model</span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Providers section -->
+      <div class="settings-section" id="section-providers">
+        <div class="settings-sec-title" data-i18n="settings_providers">Active API Providers</div>
+        <div class="settings-checkbox-group">
+          <label class="settings-checkbox">
+            <input type="checkbox" id="provider-openai" value="openai" />
+            <span>OpenAI</span>
+          </label>
+          <label class="settings-checkbox">
+            <input type="checkbox" id="provider-anthropic" value="anthropic" />
+            <span>Anthropic</span>
+          </label>
+          <label class="settings-checkbox">
+            <input type="checkbox" id="provider-gemini" value="gemini" />
+            <span>Gemini</span>
+          </label>
+        </div>
+        
+        <!-- Keys inputs (only visible if Paid mode selected) -->
+        <div id="settings-keys-inputs" style="display:flex;flex-direction:column;gap:10px;margin-top:10px;">
+          <div class="auth-input-group">
+            <label>OpenAI API Key</label>
+            <div class="key-input-container">
+              <input type="password" id="key-openai" class="settings-text" placeholder="sk-..." />
+              <button class="btn-test-key" onclick="testApiKey('openai')">Test</button>
+              <span class="key-status" id="status-openai">—</span>
+            </div>
+          </div>
+          <div class="auth-input-group">
+            <label>Anthropic API Key</label>
+            <div class="key-input-container">
+              <input type="password" id="key-anthropic" class="settings-text" placeholder="sk-ant-..." />
+              <button class="btn-test-key" onclick="testApiKey('anthropic')">Test</button>
+              <span class="key-status" id="status-anthropic">—</span>
+            </div>
+          </div>
+          <div class="auth-input-group">
+            <label>Gemini API Key</label>
+            <div class="key-input-container">
+              <input type="password" id="key-gemini" class="settings-text" placeholder="AIzaSy..." />
+              <button class="btn-test-key" onclick="testApiKey('gemini')">Test</button>
+              <span class="key-status" id="status-gemini">—</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Token budget tracker -->
+      <div class="settings-section" id="section-budget">
+        <div class="settings-sec-title" data-i18n="settings_budget">API Token Budget</div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-dim);">
+          <span data-i18n="settings_budget_used">Used Tokens</span>
+          <span id="budget-ratio">0 / 100,000</span>
+        </div>
+        <div class="progress-bar-container">
+          <div class="progress-bar" id="budget-progress-bar"></div>
+        </div>
+        <div class="auth-input-group" style="margin-top:8px;">
+          <label data-i18n="settings_budget_limit">Total Budget (tokens)</label>
+          <input type="number" id="settings-budget-limit" class="settings-text" style="width:120px;" value="100000" />
+        </div>
+        <div style="margin-top:8px;">
+          <label class="settings-checkbox" style="font-size:11px;">
+            <input type="checkbox" id="settings-auto-fallback" />
+            <span data-i18n="settings_auto_fallback">Auto fallback to Local model on exhaustion</span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Local model tuner -->
+      <div class="settings-section" id="section-local-tuner">
+        <div class="settings-sec-title" data-i18n="settings_local">Local Model Tuner</div>
+        <div class="auth-input-group">
+          <label data-i18n="settings_local_limit">Max Context Window (tokens)</label>
+          <input type="number" id="settings-local-limit" class="settings-text" style="width:120px;" value="2048" />
+        </div>
+        <div style="margin-top:8px;">
+          <label class="settings-checkbox" style="font-size:11px;">
+            <input type="checkbox" id="settings-local-auto-delete" />
+            <span data-i18n="settings_local_auto_delete">Auto delete old context (FIFO) when context full</span>
+          </label>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-dim);margin-top:8px;">
+          <span>Active Thread Context Size:</span>
+          <span id="local-context-size">0 tokens</span>
+        </div>
+      </div>
+
+      <!-- Database Actions -->
+      <div class="settings-section">
+        <div class="settings-sec-title" data-i18n="settings_actions">Database Actions</div>
+        <div class="settings-actions-grid">
+          <button class="btn-danger" onclick="pruneLocalContext()" data-i18n="settings_btn_prune">Prune Local Context</button>
+          <button class="btn-danger" onclick="resetTokenUsage()" data-i18n="settings_btn_reset">Reset Token Usage</button>
+          <button class="btn-danger" style="grid-column: span 2;" onclick="wipeLocalContext()" data-i18n="settings_btn_wipe">Wipe Local History & Context</button>
+        </div>
+      </div>
+
+      <div class="settings-btn-group">
+        <button class="btn-run" onclick="saveSettings()" data-i18n="settings_btn_save">Save Settings</button>
+        <button class="btn-sm" onclick="toggleSettingsModal(false)" data-i18n="settings_btn_close">Close</button>
+      </div>
+    </div>
+  </div>
+
+<div id="app">
+
+  <!-- ── Topbar ─────────────────────────────────────────────────── -->
+  <header id="topbar">
+    <div class="logo">
+      <span data-i18n="logo_prefix">Agent</span><span data-i18n="logo_suffix" style="color:var(--text-dim);font-weight:400;">OS</span>
+    </div>
+
+    <div class="tab-bar">
+      <button class="tab active" id="tab-editor" onclick="switchView('editor')" data-i18n="tab_editor">Editor</button>
+      <button class="tab" id="tab-dashboard" onclick="window.location='/dashboard'" data-i18n="tab_dashboard">Dashboard</button>
+    </div>
+
+    <div class="topbar-spacer"></div>
+
+    <div class="status-pill" id="status-pill">
+      <span class="status-dot" id="status-dot"></span>
+      <span id="status-text" data-i18n="status_idle">Idle</span>
+    </div>
+
+    <button class="btn-sm" onclick="toggleSettingsModal(true)" data-i18n="settings_button">⚙ Settings</button>
+    <button class="btn-sm" id="logout-btn" style="display:none;" onclick="handleLogout()" data-i18n="auth_btn_logout">Logout</button>
+    <button class="btn-sm" onclick="clearOutput()" data-i18n="btn_clear_output">Clear Output</button>
+    <button class="btn-run" id="run-btn" onclick="runCode()" data-i18n="btn_run">▶ Run</button>
+  </header>
+
+  <!-- ── Activity bar ───────────────────────────────────────────── -->
+  <nav id="activitybar">
+    <button class="act-btn active" id="act-chat" onclick="switchPanel('chat')">
+      💬<span class="tooltip">Chat</span>
+    </button>
+    <button class="act-btn" id="act-snippets" onclick="switchPanel('snippets')">
+      📦<span class="tooltip">Snippets</span>
+    </button>
+    <button class="act-btn" onclick="newFile()">
+      ➕<span class="tooltip">New File</span>
+    </button>
+    <button class="act-btn" onclick="formatCode()">
+      ✨<span class="tooltip">Format</span>
+    </button>
+  </nav>
+
+  <!-- ── Main editor ─────────────────────────────────────────────── -->
+  <main id="main-area">
+    <div id="file-tabs"></div>
+    <div id="editor-wrapper">
+      <div id="monaco-editor"></div>
+    </div>
+    <div id="output-panel">
+      <div class="output-header">
+        <strong>Terminal</strong>
+        <span id="output-status" style="color:var(--text-dim)">ready</span>
+        <span class="output-clear" onclick="clearOutput()">✕</span>
+      </div>
+      <div id="output-content"></div>
+    </div>
+  </main>
+
+  <!-- ── Right sidebar ───────────────────────────────────────────── -->
+  <aside id="sidebar">
+    <!-- Agent status -->
+    <div id="agent-status">
+      <div class="sidebar-title">Agent Network</div>
+      <div class="agent-row">
+        <span class="agent-icon">⚡</span>
+        <div class="agent-info">
+          <div class="agent-name">CodexEngine</div>
+          <div class="agent-desc">Code gen & execution</div>
+        </div>
+        <span class="agent-badge" id="badge-codex">idle</span>
+      </div>
+      <div class="agent-row">
+        <span class="agent-icon">🔍</span>
+        <div class="agent-info">
+          <div class="agent-name">ResearchAgent</div>
+          <div class="agent-desc">Web search & docs</div>
+        </div>
+        <span class="agent-badge" id="badge-research">idle</span>
+      </div>
+      <div class="agent-row">
+        <span class="agent-icon">💾</span>
+        <div class="agent-info">
+          <div class="agent-name">DBAgent</div>
+          <div class="agent-desc">Snippets & memory</div>
+        </div>
+        <span class="agent-badge" id="badge-db">idle</span>
+      </div>
+    </div>
+
+    <!-- Panel tabs -->
+    <div id="panel-tabs">
+      <button class="panel-tab active" id="ptab-chat" onclick="switchPanel('chat')">Chat</button>
+      <button class="panel-tab" id="ptab-snippets" onclick="switchPanel('snippets')">Snippets</button>
+    </div>
+
+    <!-- Chat panel -->
+    <div id="chat-panel" class="visible">
+      <div id="chat-messages">
+        <div class="msg agent">
+          <strong style="color:var(--accent)">AgentOS</strong><br>
+          Hey! I'm your multi-agent dev assistant. Ask me to review code, research solutions, or manage your snippets.
+          <div class="msg-meta"><span class="agent-tag">Supervisor</span></div>
+        </div>
+      </div>
+      <div id="chat-input-area">
+        <textarea id="chat-input" rows="2" data-i18n="chat_input_placeholder" placeholder="Ask the agent network…" onkeydown="handleChatKey(event)"></textarea>
+        <div class="chat-actions">
+          <span class="chat-hint" data-i18n="chat_input_hint">Enter to send · Shift+Enter for newline</span>
+          <button id="send-btn" onclick="sendMessage()" data-i18n="btn_send">Send</button>
+        </div>
+      </div>
+      <div class="thread-bar">
+        <span data-i18n="thread_label">Thread:</span>
+        <span class="thread-id" id="thread-display">—</span>
+        <button class="new-thread-btn" onclick="newThread()" data-i18n="btn_new_thread">+ New</button>
+      </div>
+    </div>
+
+    <!-- Snippets panel -->
+    <div id="snippets-panel">
+      <input type="text" id="snippets-search" data-i18n="snippets_search_placeholder" placeholder="Search snippets…" oninput="filterSnippets()" />
+      <div id="snippets-list">
+        <div class="empty-state">No snippets saved yet</div>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// STATE & AUTH
+// ═══════════════════════════════════════════════════════════════════════════
+
+const API = '';  // same-origin
+let editor = null;
+let threadId = crypto.randomUUID();
+let files = {};       // { name: { content, language, modified } }
+let activeFile = null;
+let allSnippets = [];
+
+let token = localStorage.getItem('agentos_token');
+let currentLang = 'en';
+let translations = {};
+let currentSettings = {};
+
+document.getElementById('thread-display').textContent = threadId.slice(0, 8);
+
+// Helper for authenticated requests
+async function authFetch(url, options = {}) {
+  if (!options.headers) options.headers = {};
+  if (token) {
+    options.headers['Authorization'] = 'Bearer ' + token;
+  }
+  const res = await fetch(url, options);
+  if (res.status === 401) {
+    token = null;
+    localStorage.removeItem('agentos_token');
+    document.getElementById('auth-overlay').classList.remove('hidden');
+    document.getElementById('logout-btn').style.display = 'none';
+  }
+  return res;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MONACO EDITOR
+// ═══════════════════════════════════════════════════════════════════════════
+
+require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs' } });
+
+require(['vs/editor/editor.main'], function () {
+  // Register custom theme
+  monaco.editor.defineTheme('agentos-dark', {
+    base: 'vs-dark',
+    inherit: true,
+    rules: [
+      { token: 'comment',   foreground: '5a6478', fontStyle: 'italic' },
+      { token: 'keyword',   foreground: '4a7fff' },
+      { token: 'string',    foreground: '00d4aa' },
+      { token: 'number',    foreground: 'ffd166' },
+      { token: 'type',      foreground: 'ff6b35' },
+      { token: 'function',  foreground: 'e8edf5' },
+      { token: 'variable',  foreground: 'c8d0dc' },
+      { token: 'operator',  foreground: 'ff4d6a' },
+    ],
+    colors: {
+      'editor.background':                '#0d0f11',
+      'editor.foreground':                '#c8d0dc',
+      'editor.lineHighlightBackground':   '#12151a',
+      'editor.selectionBackground':       '#2a334066',
+      'editorCursor.foreground':          '#00d4aa',
+      'editorLineNumber.foreground':      '#2a3340',
+      'editorLineNumber.activeForeground':'#5a6478',
+      'editorIndentGuide.background':     '#1e2530',
+      'editor.selectionHighlightBackground':'#4a7fff22',
+    },
+  });
+
+  editor = monaco.editor.create(document.getElementById('monaco-editor'), {
+    value: '# Welcome to AgentOS\n# Write your code here, then click ▶ Run\n\nprint("Hello, AgentOS!")\n',
+    language: 'python',
+    theme: 'agentos-dark',
+    fontFamily: "'JetBrains Mono', monospace",
+    fontSize: 14,
+    fontLigatures: true,
+    minimap: { enabled: false },
+    scrollBeyondLastLine: false,
+    renderLineHighlight: 'line',
+    cursorBlinking: 'smooth',
+    cursorSmoothCaretAnimation: 'on',
+    smoothScrolling: true,
+    padding: { top: 12 },
+    lineNumbers: 'on',
+    roundedSelection: true,
+    automaticLayout: true,
+  });
+
+  // Track content changes for file tabs
+  editor.onDidChangeModelContent(() => {
+    if (activeFile && files[activeFile]) {
+      files[activeFile].content = editor.getValue();
+      files[activeFile].modified = true;
+      renderFileTabs();
+    }
+  });
+
+  // Initialize with default file
+  addFileTab('main.py', editor.getValue(), 'python');
+
+  // Check for ?snippet=id param
+  const params = new URLSearchParams(window.location.search);
+  const snippetId = params.get('snippet');
+  if (snippetId) {
+    loadSnippetInEditor(parseInt(snippetId));
+    window.history.replaceState({}, '', '/');
+  }
+});
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FILE TABS
+// ═══════════════════════════════════════════════════════════════════════════
+
+function addFileTab(name, content, language) {
+  // Avoid duplicates
+  if (files[name]) {
+    switchTab(name);
+    return;
+  }
+  files[name] = { content: content || '', language: language || detectLanguage(name), modified: false };
+  activeFile = name;
+  renderFileTabs();
+  setEditorContent(name);
+}
+
+function switchTab(name) {
+  if (!files[name]) return;
+  // Save current content
+  if (activeFile && files[activeFile]) {
+    files[activeFile].content = editor.getValue();
+  }
+  activeFile = name;
+  renderFileTabs();
+  setEditorContent(name);
+}
+
+function closeTab(name, e) {
+  if (e) e.stopPropagation();
+  delete files[name];
+  const remaining = Object.keys(files);
+  if (remaining.length === 0) {
+    addFileTab('untitled.py', '', 'python');
+  } else if (activeFile === name) {
+    switchTab(remaining[remaining.length - 1]);
+  } else {
+    renderFileTabs();
+  }
+}
+
+function setEditorContent(name) {
+  const file = files[name];
+  if (!file || !editor) return;
+  const model = editor.getModel();
+  monaco.editor.setModelLanguage(model, file.language);
+  editor.setValue(file.content);
+}
+
+function renderFileTabs() {
+  const container = document.getElementById('file-tabs');
+  container.innerHTML = '';
+  for (const name of Object.keys(files)) {
+    const f = files[name];
+    const tab = document.createElement('div');
+    tab.className = 'file-tab' + (name === activeFile ? ' active' : '');
+    tab.onclick = () => switchTab(name);
+    tab.innerHTML = `
+      ${f.modified ? '<span class="file-tab-dot">●</span>' : ''}
+      <span>${name}</span>
+      <span class="file-tab-close" onclick="closeTab('${name}', event)">×</span>
+    `;
+    container.appendChild(tab);
+  }
+}
+
+function newFile() {
+  let i = 1;
+  while (files[`untitled${i}.py`]) i++;
+  addFileTab(`untitled${i}.py`, '', 'python');
+}
+
+function detectLanguage(filename) {
+  const ext = filename.split('.').pop().toLowerCase();
+  const map = {
+    py: 'python', js: 'javascript', ts: 'typescript', html: 'html',
+    css: 'css', json: 'json', md: 'markdown', sql: 'sql',
+    sh: 'shell', bash: 'shell', yml: 'yaml', yaml: 'yaml',
+    java: 'java', cpp: 'cpp', c: 'c', rs: 'rust', go: 'go',
+    rb: 'ruby', php: 'php', r: 'r', swift: 'swift', kt: 'kotlin',
+  };
+  return map[ext] || 'plaintext';
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RUN CODE
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function runCode() {
+  const code = editor.getValue();
+  const btn = document.getElementById('run-btn');
+  const panel = document.getElementById('output-panel');
+  const content = document.getElementById('output-content');
+  const status = document.getElementById('output-status');
+
+  btn.disabled = true;
+  panel.classList.add('open');
+  content.className = '';
+  content.textContent = translations['btn_running'] || '⏳ Running…';
+  status.textContent = 'running';
+  status.style.color = 'var(--yellow)';
+  setStatus(translations['status_running'] || 'Running code…', true);
+
+  try {
+    const res = await authFetch(`${API}/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      content.textContent = data.output || '(no output)';
+      status.textContent = 'done';
+      status.style.color = 'var(--green)';
+    } else {
+      content.className = 'err';
+      content.textContent = `Error: ${data.detail || 'Unknown error'}`;
+      status.textContent = 'error';
+      status.style.color = 'var(--red)';
+    }
+  } catch (err) {
+    content.className = 'err';
+    content.textContent = `Connection error: ${err.message}`;
+    status.textContent = 'error';
+    status.style.color = 'var(--red)';
+  }
+  btn.disabled = false;
+  setStatus(translations['status_idle'] || 'Idle', false);
+}
+
+function clearOutput() {
+  const panel = document.getElementById('output-panel');
+  const content = document.getElementById('output-content');
+  const status = document.getElementById('output-status');
+  content.textContent = '';
+  content.className = '';
+  status.textContent = 'ready';
+  status.style.color = 'var(--text-dim)';
+  panel.classList.remove('open');
+}
+
+function formatCode() {
+  if (editor) {
+    editor.getAction('editor.action.formatDocument')?.run();
+  }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CHAT
+// ═══════════════════════════════════════════════════════════════════════════
+
+function handleChatKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+}
+
+async function sendMessage() {
+  const input = document.getElementById('chat-input');
+  const prompt = input.value.trim();
+  if (!prompt) return;
+
+  const messagesEl = document.getElementById('chat-messages');
+  const sendBtn = document.getElementById('send-btn');
+
+  // Render user message
+  appendMsg('user', prompt);
+  input.value = '';
+  sendBtn.disabled = true;
+  setStatus(translations['status_working'] || 'Agents working…', true);
+  setAgentBadges('active');
+
+  // Thinking indicator
+  const thinkingId = 'thinking-' + Date.now();
+  appendMsg('thinking', '🧠 Supervisor routing request…', thinkingId);
+
+  try {
+    const res = await authFetch(`${API}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, thread_id: threadId }),
+    });
+    const data = await res.json();
+
+    // Remove thinking
+    const thinkingEl = document.getElementById(thinkingId);
+    if (thinkingEl) thinkingEl.remove();
+
+    if (res.ok) {
+      threadId = data.thread_id || threadId;
+      document.getElementById('thread-display').textContent = threadId.slice(0, 8);
+      appendMsg('agent', formatMarkdown(data.response));
+    } else {
+      appendMsg('agent', `<span style="color:var(--red)">Error: ${data.detail || 'Request failed'}</span>`);
+    }
+  } catch (err) {
+    const thinkingEl = document.getElementById(thinkingId);
+    if (thinkingEl) thinkingEl.remove();
+    appendMsg('agent', `<span style="color:var(--red)">Connection error: ${err.message}</span>`);
+  }
+
+  sendBtn.disabled = false;
+  setStatus(translations['status_idle'] || 'Idle', false);
+  setAgentBadges('done');
+}
+
+function appendMsg(type, html, id) {
+  const container = document.getElementById('chat-messages');
+  const div = document.createElement('div');
+  div.className = `msg ${type}`;
+  if (id) div.id = id;
+  div.innerHTML = html;
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+function newThread() {
+  threadId = crypto.randomUUID();
+  document.getElementById('thread-display').textContent = threadId.slice(0, 8);
+  document.getElementById('chat-messages').innerHTML = `
+    <div class="msg agent">
+      <strong style="color:var(--accent)">AgentOS</strong><br>
+      New session started. How can I help?
+      <div class="msg-meta"><span class="agent-tag">Supervisor</span></div>
+    </div>
+  `;
+}
+
+function formatMarkdown(text) {
+  if (!text) return '';
+  // Code blocks
+  text = text.replace(/```(\w+)?\n([\s\S]*?)```/g, (_, lang, code) => {
+    return `<pre><code>${escapeHtml(code.trim())}</code></pre>`;
+  });
+  // Inline code
+  text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Bold
+  text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // Italic
+  text = text.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  // Headers
+  text = text.replace(/^### (.+)$/gm, '<strong style="color:var(--accent);font-size:13px;">$1</strong>');
+  text = text.replace(/^## (.+)$/gm, '<strong style="color:var(--accent);font-size:14px;">$1</strong>');
+  // Line breaks
+  text = text.replace(/\n/g, '<br>');
+  return text;
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SNIPPETS
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function loadSnippets() {
+  try {
+    const res = await authFetch(`${API}/snippets`);
+    if (!res || !res.ok) return;
+    allSnippets = await res.json();
+    renderSnippets(allSnippets);
+  } catch (err) {
+    console.error('Failed to load snippets:', err);
+  }
+}
+
+function renderSnippets(snippets) {
+  const list = document.getElementById('snippets-list');
+  if (!snippets.length) {
+    const emptyMsg = translations['snippets_empty_state'] || 'No snippets saved yet';
+    list.innerHTML = `<div class="empty-state">${emptyMsg}</div>`;
+    return;
+  }
+  list.innerHTML = snippets.map(s => {
+    const tags = s.tags ? s.tags.split(',').map(t =>
+      `<span class="snippet-tag">${t.trim()}</span>`
+    ).join('') : '';
+    const date = s.created_at ? new Date(s.created_at).toLocaleDateString() : '';
+    const openBtn = translations['btn_snippets_open'] || 'Open';
+    const deleteBtn = translations['btn_snippets_delete'] || 'Delete';
+    return `
+      <div class="snippet-card" onclick="loadSnippetInEditor(${s.id})">
+        <div class="snippet-title">${escapeHtml(s.title)}</div>
+        <div class="snippet-meta">${s.language} · ${date}</div>
+        ${tags ? `<div class="snippet-tags">${tags}</div>` : ''}
+        <div class="snippet-actions">
+          <button class="snippet-btn" onclick="event.stopPropagation(); loadSnippetInEditor(${s.id})">${openBtn}</button>
+          <button class="snippet-btn del" onclick="event.stopPropagation(); deleteSnippet(${s.id})">${deleteBtn}</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function filterSnippets() {
+  const q = document.getElementById('snippets-search').value.toLowerCase();
+  const filtered = allSnippets.filter(s =>
+    s.title.toLowerCase().includes(q) ||
+    (s.tags && s.tags.toLowerCase().includes(q)) ||
+    s.language.toLowerCase().includes(q)
+  );
+  renderSnippets(filtered);
+}
+
+async function loadSnippetInEditor(id) {
+  try {
+    const loadMsg = translations['status_loading_snippet'] || 'Loading snippet…';
+    setStatus(loadMsg, true);
+    const res = await authFetch(`${API}/snippets/${id}`);
+    if (!res.ok) throw new Error('Snippet not found');
+    const snippet = await res.json();
+
+    // Create a tab for this snippet and load the code
+    const tabName = snippet.title || `snippet-${id}`;
+    const lang = snippet.language || 'python';
+
+    // If this tab already exists, switch to it
+    if (files[tabName]) {
+      files[tabName].content = snippet.code;
+      files[tabName].language = lang;
+      switchTab(tabName);
+    } else {
+      addFileTab(tabName, snippet.code, lang);
+    }
+
+    setStatus(translations['status_idle'] || 'Idle', false);
+  } catch (err) {
+    console.error('Failed to load snippet:', err);
+    const failMsg = translations['status_load_fail'] || 'Failed to load snippet';
+    setStatus(failMsg, false);
+  }
+}
+
+async function deleteSnippet(id) {
+  try {
+    await authFetch(`${API}/snippets/${id}`, { method: 'DELETE' });
+    loadSnippets();
+  } catch (err) {
+    console.error('Failed to delete snippet:', err);
+  }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PANEL SWITCHING
+// ═══════════════════════════════════════════════════════════════════════════
+
+function switchPanel(panel) {
+  // Activity bar
+  document.querySelectorAll('.act-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById(`act-${panel}`).classList.add('active');
+
+  // Panel tabs
+  document.querySelectorAll('.panel-tab').forEach(b => b.classList.remove('active'));
+  document.getElementById(`ptab-${panel}`).classList.add('active');
+
+  // Panels
+  document.getElementById('chat-panel').classList.toggle('visible', panel === 'chat');
+  document.getElementById('snippets-panel').classList.toggle('visible', panel === 'snippets');
+
+  if (panel === 'snippets') loadSnippets();
+}
+
+function switchView(view) {
+  // Only editor view in this page; dashboard navigates away
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STATUS HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+function setStatus(text, active) {
+  document.getElementById('status-text').textContent = text;
+  const dot = document.getElementById('status-dot');
+  dot.style.background = active ? 'var(--yellow)' : 'var(--green)';
+  dot.style.boxShadow = active ? '0 0 8px var(--yellow)' : 'none';
+}
+
+function setAgentBadges(state) {
+  ['codex', 'research', 'db'].forEach(name => {
+    const badge = document.getElementById(`badge-${name}`);
+    badge.className = 'agent-badge';
+    if (state === 'active') {
+      badge.classList.add('active');
+      badge.textContent = translations['badge_working'] || 'working';
+    } else if (state === 'done') {
+      badge.classList.add('done');
+      badge.textContent = translations['badge_idle'] || 'idle';
+    } else {
+      badge.textContent = translations['badge_idle'] || 'idle';
+    }
+  });
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AUTHENTICATION LOGIC
+// ═══════════════════════════════════════════════════════════════════════════
+
+let authMode = 'login'; // or 'signup'
+
+function toggleAuthMode() {
+  const title = document.getElementById('auth-title-text');
+  const subtitle = document.getElementById('auth-subtitle-text');
+  const submitBtn = document.getElementById('auth-submit-btn');
+  const toggleText = document.getElementById('auth-toggle-text');
+  
+  if (authMode === 'login') {
+    authMode = 'signup';
+    title.textContent = translations['auth_signup'] || 'Sign Up';
+    title.setAttribute('data-i18n', 'auth_signup');
+    subtitle.textContent = 'Create a developer profile to get started.';
+    subtitle.setAttribute('data-i18n', 'auth_create_profile');
+    submitBtn.textContent = translations['auth_btn_signup'] || 'Create Account';
+    submitBtn.setAttribute('data-i18n', 'auth_btn_signup');
+    toggleText.innerHTML = 'Already have a profile? <span>Log In</span>';
+  } else {
+    authMode = 'login';
+    title.textContent = translations['auth_login'] || 'Log In';
+    title.setAttribute('data-i18n', 'auth_login');
+    subtitle.textContent = translations['auth_welcome'] || 'Welcome back! Please authenticate to access AgentOS.';
+    subtitle.setAttribute('data-i18n', 'auth_welcome');
+    submitBtn.textContent = translations['auth_btn_login'] || 'Login';
+    submitBtn.setAttribute('data-i18n', 'auth_btn_login');
+    toggleText.innerHTML = 'Register a new developer profile. <span>Sign Up</span>';
+    toggleText.setAttribute('data-i18n', 'auth_register');
+  }
+  translatePage();
+}
+
+async function handleAuthSubmit() {
+  const user = document.getElementById('auth-user').value.trim();
+  const pass = document.getElementById('auth-pass').value;
+  if (!user || !pass) {
+    alert("Please enter both username and password");
+    return;
+  }
+  
+  const endpoint = authMode === 'login' ? '/api/auth/login' : '/api/auth/signup';
+  try {
+    const res = await fetch(`${API}${endpoint}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: user, password: pass })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      token = data.token;
+      localStorage.setItem('agentos_token', token);
+      document.getElementById('auth-overlay').classList.add('hidden');
+      if (data.username !== 'local_dev_user') {
+        document.getElementById('logout-btn').style.display = 'inline-block';
+      }
+      document.getElementById('auth-user').value = '';
+      document.getElementById('auth-pass').value = '';
+      
+      await loadSettingsOnStartup();
+      loadSnippets();
+    } else {
+      alert(data.detail || 'Authentication failed');
+    }
+  } catch (err) {
+    alert('Connection error during authentication: ' + err.message);
+  }
+}
+
+function handleAuthKey(e) {
+  if (e.key === 'Enter') {
+    handleAuthSubmit();
+  }
+}
+
+function handleLogout() {
+  token = null;
+  localStorage.removeItem('agentos_token');
+  document.getElementById('auth-overlay').classList.remove('hidden');
+  document.getElementById('logout-btn').style.display = 'none';
+}
+
+async function checkAuth() {
+  try {
+    const headers = {};
+    if (token) {
+      headers['Authorization'] = 'Bearer ' + token;
+    }
+    const res = await fetch(`${API}/api/auth/me`, { headers });
+    if (res.ok) {
+      const user = await res.json();
+      document.getElementById('auth-overlay').classList.add('hidden');
+      if (user.username !== 'local_dev_user') {
+        document.getElementById('logout-btn').style.display = 'inline-block';
+      } else {
+        document.getElementById('logout-btn').style.display = 'none';
+      }
+      await loadSettingsOnStartup();
+      loadSnippets();
+    } else {
+      document.getElementById('auth-overlay').classList.remove('hidden');
+    }
+  } catch (err) {
+    console.error("Auth check failed:", err);
+    document.getElementById('auth-overlay').classList.remove('hidden');
+  }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SETTINGS LOGIC
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function toggleSettingsModal(show) {
+  const overlay = document.getElementById('settings-overlay');
+  if (show) {
+    await loadSettingsOnStartup();
+    overlay.classList.add('open');
+  } else {
+    overlay.classList.remove('open');
+  }
+}
+
+async function loadSettingsOnStartup() {
+  try {
+    const res = await authFetch(`${API}/api/settings`);
+    if (!res.ok) return;
+    const data = await res.json();
+    currentSettings = data;
+    
+    document.getElementById('settings-lang').value = data.language || 'en';
+    
+    const modeRadios = document.getElementsByName('api-mode');
+    for (const r of modeRadios) {
+      if (r.value === data.active_mode) {
+        r.checked = true;
+      }
+    }
+    
+    document.getElementById('provider-openai').checked = data.selected_providers.includes('openai');
+    document.getElementById('provider-anthropic').checked = data.selected_providers.includes('anthropic');
+    document.getElementById('provider-gemini').checked = data.selected_providers.includes('gemini');
+    
+    document.getElementById('key-openai').value = data.openai_api_key || '';
+    document.getElementById('key-anthropic').value = data.anthropic_api_key || '';
+    document.getElementById('key-gemini').value = data.gemini_api_key || '';
+    
+    document.getElementById('status-openai').textContent = data.openai_api_key ? '✓' : '—';
+    document.getElementById('status-openai').className = 'key-status' + (data.openai_api_key ? ' valid' : '');
+    document.getElementById('status-anthropic').textContent = data.anthropic_api_key ? '✓' : '—';
+    document.getElementById('status-anthropic').className = 'key-status' + (data.anthropic_api_key ? ' valid' : '');
+    document.getElementById('status-gemini').textContent = data.gemini_api_key ? '✓' : '—';
+    document.getElementById('status-gemini').className = 'key-status' + (data.gemini_api_key ? ' valid' : '');
+    
+    document.getElementById('settings-budget-limit').value = data.token_budget;
+    document.getElementById('settings-auto-fallback').checked = data.token_auto_fallback;
+    
+    document.getElementById('settings-local-limit').value = data.local_max_context_tokens;
+    document.getElementById('settings-local-auto-delete').checked = data.local_auto_delete;
+    
+    updateBudgetUI(data.token_used, data.token_budget);
+    toggleModeSections();
+    updateLocalContextSizeUI();
+    
+    if (data.language && data.language !== currentLang) {
+      await loadTranslations(data.language);
+    }
+  } catch (err) {
+    console.error('Failed to load settings:', err);
+  }
+}
+
+function updateBudgetUI(used, limit) {
+  document.getElementById('budget-ratio').textContent = `${used.toLocaleString()} / ${limit.toLocaleString()}`;
+  const pct = Math.min(100, (used / limit) * 100);
+  document.getElementById('budget-progress-bar').style.width = pct + '%';
+}
+
+async function updateLocalContextSizeUI() {
+  try {
+    const res = await authFetch(`${API}/api/local-context/size?thread_id=${threadId}`);
+    if (res.ok) {
+      const size = await res.json();
+      document.getElementById('local-context-size').textContent = `${size.tokens} tokens`;
+    }
+  } catch (err) {
+    console.error('Error loading context size:', err);
+  }
+}
+
+async function testApiKey(provider) {
+  const inputId = `key-${provider}`;
+  const statusId = `status-${provider}`;
+  const val = document.getElementById(inputId).value;
+  const statusEl = document.getElementById(statusId);
+  
+  if (!val) {
+    alert("Please enter a key to test first.");
+    return;
+  }
+  
+  statusEl.textContent = 'testing...';
+  statusEl.className = 'key-status testing';
+  
+  try {
+    const res = await authFetch(`${API}/api/settings/test-key`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider, key: val })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.valid) {
+        statusEl.textContent = '✓';
+        statusEl.className = 'key-status valid';
+      } else {
+        statusEl.textContent = '✗';
+        statusEl.className = 'key-status invalid';
+        alert(`Key validation failed for ${provider}: ${data.error || 'unknown error'}`);
+      }
+    } else {
+      statusEl.textContent = '✗';
+      statusEl.className = 'key-status invalid';
+      alert('Key validation request failed.');
+    }
+  } catch (err) {
+    statusEl.textContent = '✗';
+    statusEl.className = 'key-status invalid';
+    alert(`Error testing key: ${err.message}`);
+  }
+}
+
+function toggleModeSections() {
+  const modes = document.getElementsByName('api-mode');
+  let selectedMode = 'free';
+  for (const m of modes) {
+    if (m.checked) {
+      selectedMode = m.value;
+      break;
+    }
+  }
+  
+  const providersSec = document.getElementById('section-providers');
+  const keysInputs = document.getElementById('settings-keys-inputs');
+  const budgetSec = document.getElementById('section-budget');
+  const localSec = document.getElementById('section-local-tuner');
+  
+  if (selectedMode === 'paid') {
+    providersSec.style.display = 'block';
+    keysInputs.style.display = 'flex';
+    budgetSec.style.display = 'block';
+    localSec.style.display = 'none';
+  } else if (selectedMode === 'free') {
+    providersSec.style.display = 'block';
+    keysInputs.style.display = 'none';
+    budgetSec.style.display = 'block';
+    localSec.style.display = 'none';
+  } else if (selectedMode === 'local') {
+    providersSec.style.display = 'none';
+    keysInputs.style.display = 'none';
+    budgetSec.style.display = 'none';
+    localSec.style.display = 'block';
+  }
+}
+
+async function saveSettings() {
+  const modes = document.getElementsByName('api-mode');
+  let active_mode = 'free';
+  for (const m of modes) {
+    if (m.checked) {
+      active_mode = m.value;
+      break;
+    }
+  }
+  
+  const selected_providers = [];
+  if (document.getElementById('provider-openai').checked) selected_providers.push('openai');
+  if (document.getElementById('provider-anthropic').checked) selected_providers.push('anthropic');
+  if (document.getElementById('provider-gemini').checked) selected_providers.push('gemini');
+  
+  const openai_api_key = document.getElementById('key-openai').value;
+  const anthropic_api_key = document.getElementById('key-anthropic').value;
+  const gemini_api_key = document.getElementById('key-gemini').value;
+  const token_budget = parseInt(document.getElementById('settings-budget-limit').value) || 100000;
+  const token_auto_fallback = document.getElementById('settings-auto-fallback').checked;
+  const local_max_context_tokens = parseInt(document.getElementById('settings-local-limit').value) || 2048;
+  const local_auto_delete = document.getElementById('settings-local-auto-delete').checked;
+  const language = document.getElementById('settings-lang').value;
+  
+  const settingsBody = {
+    active_mode,
+    selected_providers,
+    token_budget,
+    token_auto_fallback,
+    local_max_context_tokens,
+    local_auto_delete,
+    language
+  };
+  
+  if (openai_api_key && openai_api_key !== '••••••••••••') settingsBody.openai_api_key = openai_api_key;
+  if (anthropic_api_key && anthropic_api_key !== '••••••••••••') settingsBody.anthropic_api_key = anthropic_api_key;
+  if (gemini_api_key && gemini_api_key !== '••••••••••••') settingsBody.gemini_api_key = gemini_api_key;
+  
+  try {
+    const res = await authFetch(`${API}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(settingsBody)
+    });
+    if (res.ok) {
+      alert('Settings saved successfully!');
+      toggleSettingsModal(false);
+      
+      if (language !== currentLang) {
+        await changeLanguage(language);
+      }
+    } else {
+      alert('Failed to save settings.');
+    }
+  } catch (err) {
+    alert(`Error saving settings: ${err.message}`);
+  }
+}
+
+async function pruneLocalContext() {
+  if (!confirm("Are you sure you want to prune the older context messages of the active thread?")) return;
+  try {
+    const res = await authFetch(`${API}/api/local-context/prune?thread_id=${threadId}`, { method: 'POST' });
+    if (res.ok) {
+      const result = await res.json();
+      alert(`Success: Pruned ${result.pruned} messages. ${result.remaining} messages remain in context.`);
+      updateLocalContextSizeUI();
+    } else {
+      const errData = await res.json();
+      alert(`Failed to prune: ${errData.detail || 'unknown error'}`);
+    }
+  } catch (err) {
+    alert(`Error pruning context: ${err.message}`);
+  }
+}
+
+async function resetTokenUsage() {
+  if (!confirm("Are you sure you want to reset your token usage tally to 0?")) return;
+  try {
+    const res = await authFetch(`${API}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token_used: 0 })
+    });
+    if (res.ok) {
+      alert("Token usage has been reset to 0.");
+      loadSettingsOnStartup();
+    } else {
+      alert("Failed to reset token usage.");
+    }
+  } catch (err) {
+    alert(`Error resetting tokens: ${err.message}`);
+  }
+}
+
+async function wipeLocalContext() {
+  if (!confirm("This will delete the active thread checkpointer, memory files, and pruned history files for this user. Continue?")) return;
+  try {
+    const res = await authFetch(`${API}/api/local-context?thread_id=${threadId}`, { method: 'DELETE' });
+    if (res.ok) {
+      alert("Local history, memory, and context have been completely wiped.");
+      newThread();
+      updateLocalContextSizeUI();
+      toggleSettingsModal(false);
+    } else {
+      alert("Failed to wipe local history.");
+    }
+  } catch (err) {
+    alert(`Error wiping history: ${err.message}`);
+  }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INTERNATIONALIZATION (i18n) LOGIC
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function loadTranslations(lang) {
+  try {
+    const res = await fetch(`/locales/${lang}.json`);
+    if (res.ok) {
+      translations = await res.json();
+      currentLang = lang;
+      translatePage();
+    }
+  } catch (err) {
+    console.error(`Failed to load translation catalog for ${lang}:`, err);
+  }
+}
+
+function translatePage() {
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const key = el.getAttribute('data-i18n');
+    if (translations[key]) {
+      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+        el.placeholder = translations[key];
+      } else {
+        el.textContent = translations[key];
+      }
+    }
+  });
+}
+
+async function changeLanguage(lang) {
+  await loadTranslations(lang);
+  try {
+    await authFetch(`${API}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ language: lang })
+    });
+  } catch (err) {
+    console.error('Failed to save language setting to backend:', err);
+  }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function initializeApp() {
+  await loadTranslations(currentLang);
+  await checkAuth();
+  
+  setInterval(loadSnippets, 30000);
+}
+
+initializeApp();
+</script>
+</body>
+</html>

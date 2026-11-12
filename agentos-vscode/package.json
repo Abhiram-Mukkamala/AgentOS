@@ -1,0 +1,71 @@
+{
+  "name": "agentos-vscode",
+  "displayName": "AgentOS",
+  "description": "Multi-agent developer productivity assistant inside VS Code",
+  "version": "2.0.0",
+  "publisher": "agentos",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "activationEvents": [
+    "*"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "agentos-sidebar",
+          "title": "AgentOS",
+          "icon": "$(hubot)"
+        }
+      ]
+    },
+    "views": {
+      "agentos-sidebar": [
+        {
+          "type": "webview",
+          "id": "agentos.chatView",
+          "name": "AgentOS Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "agentos.startServer",
+        "title": "AgentOS: Start Backend Server"
+      },
+      {
+        "command": "agentos.stopServer",
+        "title": "AgentOS: Stop Backend Server"
+      },
+      {
+        "command": "agentos.openSettings",
+        "title": "AgentOS: Configure API Keys"
+      },
+      {
+        "command": "agentos.focus",
+        "title": "AgentOS: Open Chat View"
+      }
+    ],
+    "configuration": {
+      "title": "AgentOS",
+      "properties": {
+        "agentos.backendPort": {
+          "type": "integer",
+          "default": 8080,
+          "description": "Port on which the AgentOS backend runs."
+        },
+        "agentos.autoStartBackend": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the FastAPI backend server when VS Code opens."
+        }
+      }
+    }
+  }
+}
