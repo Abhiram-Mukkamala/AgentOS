@@ -60,5 +60,6 @@
   "auth_btn_signup": "Create Account",
   "auth_btn_logout": "Logout",
   "auth_welcome": "Welcome back! Please authenticate to access AgentOS.",
+  "auth_create_profile": "Create a developer profile to get started.",
   "auth_register": "Register a new developer profile."
 }

@@ -1,22 +1,26 @@
 """
-database.py — AgentOS persistent storage layer.
+database.py — AgentOS persistent storage layer and shared auth utilities.
 
 Supports:
   • SQLite (local dev, default)        DATABASE_URL=sqlite+aiosqlite:///./agentos.db
   • Supabase / Postgres (production)   DATABASE_URL=postgresql://user:pass@host/db
 """
 
+import hashlib
+import hmac
+import logging
 import os
 from datetime import datetime
-from typing import Optional
 
 from dotenv import load_dotenv
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.pool import NullPool
 
 load_dotenv()
+
+log = logging.getLogger("agentos.database")
 
 # ── Connection URL ──────────────────────────────────────────────────────────────
 
@@ -30,8 +34,6 @@ if _raw_url.startswith("postgresql://") or _raw_url.startswith("postgres://"):
 DATABASE_URL = _raw_url
 
 # ── Engine & Session ────────────────────────────────────────────────────────────
-# BUG FIX: original code defined engine + AsyncSessionLocal twice — the first pair
-# was silently overwritten by the second, making the NullPool setting unreachable.
 
 engine = create_async_engine(DATABASE_URL, poolclass=NullPool, echo=False)
 AsyncSessionLocal = async_sessionmaker(
@@ -58,7 +60,6 @@ class User(Base):
     token_budget             = Column(Integer, default=100000)
     token_used               = Column(Integer, default=0)
     token_warning_threshold  = Column(Float, default=0.90)
-    token_warning_sent       = Column(Boolean, default=False)
     token_auto_fallback      = Column(Boolean, default=True)
     local_max_context_tokens = Column(Integer, default=2048)
     local_auto_delete        = Column(Boolean, default=True)
@@ -92,14 +93,48 @@ class Improvement(Base):
     created_at  = Column(DateTime, default=datetime.utcnow)
 
 
-class Task(Base):
-    """General task / note storage (kept for backwards compatibility)."""
-    __tablename__ = "tasks"
+# ── Shared Cryptographic & Local Dev User Helpers ───────────────────────────────
 
-    id          = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    description = Column(Text, nullable=False)
-    status      = Column(String, default="pending")
-    due_date    = Column(String, nullable=True)
+
+def hash_password(password: str) -> str:
+    """Hash a plaintext password using PBKDF2-HMAC-SHA256 with a 16-byte random salt."""
+    salt = os.urandom(16)
+    key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100000)
+    return f"{salt.hex()}${key.hex()}"
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    """Verify a plaintext password against a stored PBKDF2-HMAC-SHA256 hash."""
+    try:
+        salt_hex, key_hex = hashed.split("$", 1)
+        salt = bytes.fromhex(salt_hex)
+        key = bytes.fromhex(key_hex)
+        new_key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100000)
+        return hmac.compare_digest(key, new_key)
+    except Exception:
+        return False
+
+
+async def get_or_create_local_dev_user(session: AsyncSession | None = None) -> User:
+    """Fetch or lazily create the default `local_dev_user` account."""
+    async def _run(db: AsyncSession) -> User:
+        result = await db.execute(select(User).where(User.username == "local_dev_user"))
+        user = result.scalar_one_or_none()
+        if not user:
+            user = User(
+                username="local_dev_user",
+                hashed_password=hash_password("local_dev_password"),
+            )
+            db.add(user)
+            await db.commit()
+            await db.refresh(user)
+        return user
+
+    if session is not None:
+        return await _run(session)
+
+    async with AsyncSessionLocal() as db:
+        return await _run(db)
 
 
 # ── Initialisation ──────────────────────────────────────────────────────────────

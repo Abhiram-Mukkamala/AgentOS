@@ -8,10 +8,8 @@ the optimal model size, context window, and thread count.
 import logging
 import os
 import platform
-import shutil
 import subprocess
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Optional
 
 log = logging.getLogger("codex_engine.hardware")
@@ -101,14 +99,13 @@ def _detect_cpu() -> tuple[int, int]:
 
 def _detect_gpu() -> tuple[Optional[str], Optional[float]]:
     """Returns (gpu_name, vram_gb) or (None, None) if no NVIDIA GPU."""
-    # Try pynvml first (most reliable)
     try:
         from pynvml import (
-            nvmlInit,
             nvmlDeviceGetCount,
             nvmlDeviceGetHandleByIndex,
             nvmlDeviceGetMemoryInfo,
             nvmlDeviceGetName,
+            nvmlInit,
             nvmlShutdown,
         )
 
@@ -118,7 +115,7 @@ def _detect_gpu() -> tuple[Optional[str], Optional[float]]:
             nvmlShutdown()
             return None, None
 
-        handle = nvmlDeviceGetHandleByIndex(0)  # Use first GPU
+        handle = nvmlDeviceGetHandleByIndex(0)
         info = nvmlDeviceGetMemoryInfo(handle)
         name = nvmlDeviceGetName(handle)
         if isinstance(name, bytes):
@@ -130,7 +127,6 @@ def _detect_gpu() -> tuple[Optional[str], Optional[float]]:
     except Exception:
         pass
 
-    # Fallback: try nvidia-smi CLI
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
@@ -167,7 +163,6 @@ def _detect_ssd() -> bool:
 
     elif system == "Linux":
         try:
-            # Check if the root device is rotational
             result = subprocess.run(
                 ["lsblk", "-d", "-o", "name,rota", "--noheadings"],
                 capture_output=True, text=True, timeout=5,
@@ -176,21 +171,20 @@ def _detect_ssd() -> bool:
                 for line in result.stdout.strip().split("\n"):
                     parts = line.split()
                     if len(parts) == 2 and parts[1] == "0":
-                        return True  # rota=0 means non-rotational (SSD/NVMe)
+                        return True
         except Exception:
             pass
 
-    elif system == "Darwin":  # macOS — always has SSD since ~2015
+    elif system == "Darwin":
         return True
 
-    return False  # Assume HDD if detection fails
+    return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Model Selection
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# HuggingFace model registry — ordered from largest to smallest
 MODEL_REGISTRY = [
     {
         "name": "Qwen2.5-Coder-32B-Instruct (Q4_K_M)",
@@ -198,7 +192,7 @@ MODEL_REGISTRY = [
         "file": "qwen2.5-coder-32b-instruct-q4_k_m.gguf",
         "size_gb": 20.0,
         "min_ram_gb": 24.0,
-        "min_ram_ssd_gb": 12.0,  # With mmap overflow
+        "min_ram_ssd_gb": 12.0,
         "tier": "32b",
     },
     {
@@ -237,27 +231,25 @@ def select_model_config(profile: HardwareProfile, force_size: str = None) -> Har
 
     Strategy:
       1. If RAM alone can hold the model → load normally
-      2. If RAM is tight but SSD exists → enable mmap overflow (slower but works)
+      2. If RAM is tight, SSD exists, and LOCAL_CODEX_SSD_OVERFLOW != "false" → enable mmap overflow
       3. If nothing fits → return empty (caller should fall back to cloud)
     """
     available = profile.available_ram_gb
-    has_ssd = profile.has_ssd
+    ssd_overflow_enabled = os.getenv("LOCAL_CODEX_SSD_OVERFLOW", "true").lower() == "true"
+    allow_ssd_overflow = profile.has_ssd and ssd_overflow_enabled
 
     chosen = None
 
     for model in MODEL_REGISTRY:
-        # User forced a specific size
         if force_size and model["tier"] != force_size:
             continue
 
-        # Check if it fits in RAM directly
         if available >= model["min_ram_gb"]:
             chosen = model
             profile.ssd_overflow_active = False
             break
 
-        # Check if it fits with SSD overflow
-        if has_ssd and available >= model["min_ram_ssd_gb"]:
+        if allow_ssd_overflow and available >= model["min_ram_ssd_gb"]:
             chosen = model
             profile.ssd_overflow_active = True
             log.warning(
@@ -269,7 +261,6 @@ def select_model_config(profile: HardwareProfile, force_size: str = None) -> Har
 
     if chosen is None:
         if os.getenv("BYPASS_RAM_CHECK", "false").lower() == "true":
-            # Force selecting the smallest model in registry or the forced size if matching
             if force_size:
                 for model in MODEL_REGISTRY:
                     if model["tier"] == force_size:
@@ -277,7 +268,7 @@ def select_model_config(profile: HardwareProfile, force_size: str = None) -> Har
                         break
             if chosen is None:
                 chosen = MODEL_REGISTRY[-1]
-            profile.ssd_overflow_active = True
+            profile.ssd_overflow_active = ssd_overflow_enabled
             log.warning(
                 "BYPASS_RAM_CHECK is active. Forcing model selection: %s (%.1f GB) despite low RAM (%.1f GB available).",
                 chosen["name"], chosen["size_gb"], available,
@@ -291,27 +282,18 @@ def select_model_config(profile: HardwareProfile, force_size: str = None) -> Har
             profile.recommended_model = ""
             return profile
 
-    # ── Fill the profile ────────────────────────────────────────────────────
     profile.recommended_model = chosen["name"]
     profile.recommended_repo = chosen["repo"]
     profile.recommended_file = chosen["file"]
     profile.model_size_gb = chosen["size_gb"]
 
-    # Context window: use remaining memory (after model + 1 GB OS overhead)
     remaining = max(0.5, available - chosen["size_gb"] - 1.0)
-    # ~2048 tokens per GB of KV cache memory (rough estimate for Q4 models)
     estimated_ctx = int(remaining * 2048)
     profile.n_ctx = max(4096, min(32768, estimated_ctx))
 
-    # GPU layers: -1 = offload as many as possible to GPU
     profile.n_gpu_layers = -1 if profile.gpu_vram_gb else 0
-
-    # Threads: use physical cores (not hyperthreads — diminishing returns)
     profile.n_threads = max(1, min(profile.cpu_cores, 12))
-
-    # mmap: always enabled — allows SSD overflow
-    profile.use_mmap = True
-    # mlock: disabled so the OS CAN page to SSD when needed
+    profile.use_mmap = ssd_overflow_enabled or not profile.ssd_overflow_active
     profile.use_mlock = False
 
     return profile
@@ -325,12 +307,6 @@ def select_model_config(profile: HardwareProfile, force_size: str = None) -> Har
 def detect_hardware(force_size: str = None) -> HardwareProfile:
     """
     Full hardware detection + model selection in one call.
-
-    Args:
-        force_size: Override auto-detection. One of "7b", "7b-light", "14b", "32b".
-
-    Returns:
-        HardwareProfile with all fields populated, including recommended model.
     """
     log.info("Detecting hardware...")
 
@@ -355,8 +331,6 @@ def detect_hardware(force_size: str = None) -> HardwareProfile:
     log.info("\n%s", profile.summary())
     return profile
 
-
-# ── CLI test ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")

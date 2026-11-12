@@ -249,7 +249,7 @@
   <div class="title">AgentOS <span>v2</span></div>
   <div class="status">
     <div class="status-dot"></div>
-    <span>Connected</span>
+    <span id="status-label">Connected (:{{PORT}})</span>
   </div>
 </header>
 
@@ -276,6 +276,7 @@
 
 <script>
   const vscode = acquireVsCodeApi();
+  let backendPort = Number("{{PORT}}") || 8080;
   let currentThreadId = null;
 
   const chatContainer = document.getElementById('chat-container');
@@ -368,20 +369,25 @@
         saveState();
         break;
       }
+      case 'portUpdated': {
+        backendPort = Number(message.port) || backendPort;
+        updateConnectionStatus(true);
+        break;
+      }
     }
   });
 
   function updateConnectionStatus(connected) {
     const dot = document.querySelector('.status-dot');
-    const text = document.querySelector('.status span');
+    const text = document.getElementById('status-label') || document.querySelector('.status span');
     if (connected) {
       dot.style.background = 'var(--green)';
       dot.style.boxShadow = '0 0 8px var(--green)';
-      text.textContent = 'Connected';
+      text.textContent = `Connected (:${backendPort})`;
     } else {
       dot.style.background = 'var(--red)';
       dot.style.boxShadow = '0 0 8px var(--red)';
-      text.textContent = 'Disconnected';
+      text.textContent = `Disconnected (:${backendPort})`;
     }
   }
 

@@ -700,19 +700,6 @@
     to { transform: rotate(360deg); }
   }
 
-  @keyframes shimmer {
-    0% { background-position: -200% 0; }
-    100% { background-position: 200% 0; }
-  }
-
-  .shimmer-bar {
-    height: 12px;
-    border-radius: 6px;
-    background: linear-gradient(90deg, var(--border) 25%, var(--border2) 50%, var(--border) 75%);
-    background-size: 200% 100%;
-    animation: shimmer 1.5s infinite;
-  }
-
   /* ═══════════════════════════════════════════════════
      RESPONSIVE
      ═══════════════════════════════════════════════════ */
@@ -784,7 +771,7 @@
       <div class="stat-icon">🤖</div>
       <div class="stat-label">Agent Calls Today</div>
       <div class="stat-value" id="statAgentCalls">0</div>
-      <div class="stat-trend"><span class="up">▲</span> live estimate</div>
+      <div class="stat-trend"><span class="up">▲</span> from /api/metrics</div>
     </div>
   </section>
 
@@ -894,9 +881,6 @@ const LANG_COLORS = {
   'bash':       '#89e051'
 };
 
-let refreshTimer = null;
-let agentCallsMock = Math.floor(Math.random() * 36) + 12; // 12–47
-
 // ═══════════════════════════════════════════════════
 // COUNT-UP ANIMATION
 // ═══════════════════════════════════════════════════
@@ -956,7 +940,12 @@ function esc(s) {
 // ═══════════════════════════════════════════════════
 async function fetchJSON(url) {
   try {
-    const res = await fetch(url);
+    const headers = {};
+    const token = localStorage.getItem('agentos_token');
+    if (token) {
+      headers['Authorization'] = 'Bearer ' + token;
+    }
+    const res = await fetch(url, { headers });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
   } catch (e) {
@@ -1183,23 +1172,20 @@ async function loadDashboard(showRefreshIndicator = false) {
   const indicator = document.getElementById('refreshIndicator');
   if (showRefreshIndicator) indicator.classList.add('visible');
 
-  const [snippets, improvements] = await Promise.all([
+  const [snippets, improvements, metrics] = await Promise.all([
     fetchJSON('/snippets'),
-    fetchJSON('/improvements')
+    fetchJSON('/improvements'),
+    fetchJSON('/api/metrics')
   ]);
 
   // Stats
-  const snippetCount = Array.isArray(snippets) ? snippets.length : 0;
-  const improvementCount = Array.isArray(improvements) ? improvements.length : 0;
-
-  // Slightly vary agent calls on refresh
-  if (showRefreshIndicator) {
-    agentCallsMock = Math.min(99, agentCallsMock + Math.floor(Math.random() * 3));
-  }
+  const snippetCount = Array.isArray(snippets) ? snippets.length : (metrics?.snippets_count ?? 0);
+  const improvementCount = Array.isArray(improvements) ? improvements.length : (metrics?.improvements_count ?? 0);
+  const agentCallsToday = metrics?.agent_calls_today ?? 0;
 
   animateCount(document.getElementById('statSnippets'), snippetCount);
   animateCount(document.getElementById('statImprovements'), improvementCount);
-  animateCount(document.getElementById('statAgentCalls'), agentCallsMock);
+  animateCount(document.getElementById('statAgentCalls'), agentCallsToday);
 
   // Render sections
   renderImprovements(improvements);
@@ -1217,7 +1203,7 @@ document.addEventListener('DOMContentLoaded', () => {
   loadDashboard(false);
 
   // Auto-refresh every 30 seconds
-  refreshTimer = setInterval(() => {
+  setInterval(() => {
     loadDashboard(true);
   }, 30000);
 });

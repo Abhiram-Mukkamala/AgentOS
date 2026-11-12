@@ -35,7 +35,6 @@
   --sans:      'Syne', sans-serif;
   --radius:    6px;
   --panel:     320px;
-  --chat:      360px;
 }
 
 html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 13px; }
@@ -455,7 +454,7 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
             <label>OpenAI API Key</label>
             <div class="key-input-container">
               <input type="password" id="key-openai" class="settings-text" placeholder="sk-..." />
-              <button class="btn-test-key" onclick="testApiKey('openai')">Test</button>
+              <button class="btn-test-key" onclick="testApiKey('openai')" data-i18n="settings_btn_test_key">Test Key</button>
               <span class="key-status" id="status-openai">—</span>
             </div>
           </div>
@@ -463,7 +462,7 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
             <label>Anthropic API Key</label>
             <div class="key-input-container">
               <input type="password" id="key-anthropic" class="settings-text" placeholder="sk-ant-..." />
-              <button class="btn-test-key" onclick="testApiKey('anthropic')">Test</button>
+              <button class="btn-test-key" onclick="testApiKey('anthropic')" data-i18n="settings_btn_test_key">Test Key</button>
               <span class="key-status" id="status-anthropic">—</span>
             </div>
           </div>
@@ -471,7 +470,7 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
             <label>Gemini API Key</label>
             <div class="key-input-container">
               <input type="password" id="key-gemini" class="settings-text" placeholder="AIzaSy..." />
-              <button class="btn-test-key" onclick="testApiKey('gemini')">Test</button>
+              <button class="btn-test-key" onclick="testApiKey('gemini')" data-i18n="settings_btn_test_key">Test Key</button>
               <span class="key-status" id="status-gemini">—</span>
             </div>
           </div>
@@ -545,7 +544,7 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
     </div>
 
     <div class="tab-bar">
-      <button class="tab active" id="tab-editor" onclick="switchView('editor')" data-i18n="tab_editor">Editor</button>
+      <button class="tab active" id="tab-editor" data-i18n="tab_editor">Editor</button>
       <button class="tab" id="tab-dashboard" onclick="window.location='/dashboard'" data-i18n="tab_dashboard">Dashboard</button>
     </div>
 
@@ -598,37 +597,37 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
   <aside id="sidebar">
     <!-- Agent status -->
     <div id="agent-status">
-      <div class="sidebar-title">Agent Network</div>
+      <div class="sidebar-title" data-i18n="sidebar_agent_network">Agent Network</div>
       <div class="agent-row">
         <span class="agent-icon">⚡</span>
         <div class="agent-info">
           <div class="agent-name">CodexEngine</div>
-          <div class="agent-desc">Code gen & execution</div>
+          <div class="agent-desc" data-i18n="agent_codex_desc">Code gen & execution</div>
         </div>
-        <span class="agent-badge" id="badge-codex">idle</span>
+        <span class="agent-badge" id="badge-codex" data-i18n="badge_idle">idle</span>
       </div>
       <div class="agent-row">
         <span class="agent-icon">🔍</span>
         <div class="agent-info">
           <div class="agent-name">ResearchAgent</div>
-          <div class="agent-desc">Web search & docs</div>
+          <div class="agent-desc" data-i18n="agent_research_desc">Web search & docs</div>
         </div>
-        <span class="agent-badge" id="badge-research">idle</span>
+        <span class="agent-badge" id="badge-research" data-i18n="badge_idle">idle</span>
       </div>
       <div class="agent-row">
         <span class="agent-icon">💾</span>
         <div class="agent-info">
           <div class="agent-name">DBAgent</div>
-          <div class="agent-desc">Snippets & memory</div>
+          <div class="agent-desc" data-i18n="agent_db_desc">Snippets & memory</div>
         </div>
-        <span class="agent-badge" id="badge-db">idle</span>
+        <span class="agent-badge" id="badge-db" data-i18n="badge_idle">idle</span>
       </div>
     </div>
 
     <!-- Panel tabs -->
     <div id="panel-tabs">
-      <button class="panel-tab active" id="ptab-chat" onclick="switchPanel('chat')">Chat</button>
-      <button class="panel-tab" id="ptab-snippets" onclick="switchPanel('snippets')">Snippets</button>
+      <button class="panel-tab active" id="ptab-chat" onclick="switchPanel('chat')" data-i18n="panel_tab_chat">Chat</button>
+      <button class="panel-tab" id="ptab-snippets" onclick="switchPanel('snippets')" data-i18n="panel_tab_snippets">Snippets</button>
     </div>
 
     <!-- Chat panel -->
@@ -1139,10 +1138,6 @@ function switchPanel(panel) {
   document.getElementById('snippets-panel').classList.toggle('visible', panel === 'snippets');
 
   if (panel === 'snippets') loadSnippets();
-}
-
-function switchView(view) {
-  // Only editor view in this page; dashboard navigates away
 }
 
 

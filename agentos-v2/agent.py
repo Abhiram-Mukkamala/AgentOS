@@ -5,29 +5,33 @@ Architecture:
   Commenter Supervisor ─┬─► CodexEngine    (ReAct loop: plan → act → observe → repeat)
                         ├─► ResearchAgent  (web search, scraping, algorithm lookup)
                         └─► DBAgent        (snippets, changelog)
-
-Key design changes vs v1:
-  • worker_node is now a ReAct loop — the agent keeps calling tools until it
-    decides it's done (no more tool calls), not just one round. This is what
-    makes Codex feel like Codex: read file → analyse → patch → run tests →
-    read failures → patch again → run tests → green → done.
-  • Codex gets a separate inner iteration cap (CODEX_MAX_STEPS) independent
-    of the supervisor's routing budget, so complex tasks get enough room.
-  • A planning pass is injected before Codex's first tool call so it
-    reasons about the full task before acting (reduces wasted steps).
-  • edit_file is replaced by patch_file everywhere.
 """
 
+import asyncio
+import concurrent.futures
+import json
 import logging
+import math
 import operator
 import os
+import re
+import socket
+import time
+import uuid
 from functools import partial
-from typing import Annotated, Literal, Sequence, TypedDict
+from pathlib import Path
+from typing import Annotated, Any, List, Literal, Optional, Sequence, TypedDict
+from urllib.parse import urlparse
 
-log = logging.getLogger("agentos")
-
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
+import httpx
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import RunnableConfig
+from langchain_core.utils.function_calling import convert_to_openai_tool
+from langgraph.graph import END, StateGraph
+from pydantic import BaseModel, Field
+from pydantic_core import PydanticUndefined
 
 try:
     from langchain_google_genai import ChatGoogleGenerativeAI
@@ -44,11 +48,8 @@ try:
 except ImportError:
     ChatOpenAI = None
 
-from langgraph.graph import END, StateGraph
-from pydantic import BaseModel, Field
-
 from memory_manager import load_memory, memory_to_system_message, update_memory
-
+from settings_manager import add_user_tokens, estimate_tokens, get_user_settings
 from tools import (
     analyze_code,
     execute_code,
@@ -68,47 +69,83 @@ from tools import (
     write_file,
 )
 
-# ── LLM Factory ─────────────────────────────────────────────────────────────────
+log = logging.getLogger("agentos")
+
+
+# ── Async / Sync Delegation Helper ──────────────────────────────────────────────
+
+
+def _run_sync(coro):
+    """Run an async coroutine from a synchronous `.invoke()` context."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop and loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    return asyncio.run(coro)
+
+
+# ── LLM Factory & Key Validation ────────────────────────────────────────────────
+
+
+def _shannon_entropy(s: str) -> float:
+    if not s:
+        return 0.0
+    n = len(s)
+    counts: dict[str, int] = {}
+    for ch in s:
+        counts[ch] = counts.get(ch, 0) + 1
+    return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
 
 def _is_valid_key(key: str | None) -> bool:
+    """Validate API key format using placeholder rejection, length, and Shannon entropy."""
     if not key:
         return False
     k = key.strip()
-    placeholders = {
-        "your_anthropic_key_here",
-        "your_openai_key_here",
-        "your_gemini_key_here",
-        "placeholder",
-        ""
-    }
-    if k in placeholders:
+    if len(k) < 16:
         return False
-    if "your_" in k.lower() or "placeholder" in k.lower():
+    lower = k.lower()
+    invalid_markers = ("your_", "your-", "placeholder", "dummy", "changeme", "example", "test_key")
+    if any(m in lower for m in invalid_markers):
+        return False
+    if _shannon_entropy(k) < 3.0:
         return False
     return True
 
+
 class MissingAPIKeysModel:
-    def invoke(self, *args, **kwargs):
-        raise ValueError("PAID_API_KEYS_MISSING_OR_INVALID")
     async def ainvoke(self, *args, **kwargs):
         raise ValueError("PAID_API_KEYS_MISSING_OR_INVALID")
+
+    def invoke(self, *args, **kwargs):
+        return _run_sync(self.ainvoke(*args, **kwargs))
+
     def bind_tools(self, *args, **kwargs):
         return self
+
     def with_structured_output(self, *args, **kwargs):
         return self
 
-class LocalContextExceededModel:
-    def invoke(self, *args, **kwargs):
-        raise ValueError("LOCAL_CONTEXT_WINDOW_EXCEEDED")
-    async def ainvoke(self, *args, **kwargs):
-        raise ValueError("LOCAL_CONTEXT_WINDOW_EXCEEDED")
-    def bind_tools(self, *args, **kwargs):
-        return self
-    def with_structured_output(self, *args, **kwargs):
-        return self
 
-def ensure_local_server(runnable):
-    from langchain_core.language_models.chat_models import BaseChatModel
+# ── Embedded Local Server Watchdog with TTL Cache ───────────────────────────────
+
+_last_server_check_ts: float = 0.0
+_SERVER_CHECK_TTL_SECONDS: float = 30.0
+
+
+def ensure_local_server(runnable) -> None:
+    """
+    Ensure the local Codex Engine server is listening when a local model is invoked.
+    Uses a 30-second TTL cache so repeated calls do not block on socket/HTTP checks.
+    """
+    global _last_server_check_ts
+    now = time.monotonic()
+    if now - _last_server_check_ts < _SERVER_CHECK_TTL_SECONDS:
+        return
+
     underlying = runnable
     while True:
         if isinstance(underlying, BaseChatModel):
@@ -117,61 +154,58 @@ def ensure_local_server(runnable):
             underlying = underlying.bound
         elif hasattr(underlying, "bound_model"):
             underlying = underlying.bound_model
-        elif hasattr(underlying, "model"):
-            if isinstance(underlying.model, str):
-                break
+        elif hasattr(underlying, "model") and not isinstance(underlying.model, str):
             underlying = underlying.model
         else:
             break
-    
+
     api_base = ""
     if hasattr(underlying, "openai_api_base") and underlying.openai_api_base:
         api_base = str(underlying.openai_api_base)
     elif hasattr(underlying, "base_url") and underlying.base_url:
         api_base = str(underlying.base_url)
-    if "8090" in api_base:
-        try:
-            import socket
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(1.0)
-                s.connect(("127.0.0.1", 8090))
-                # Socket is open, server is running or port is in use! Do not attempt to start it again.
-                return
-        except Exception:
-            pass
-        
-        try:
-            from codex_engine import start_codex_server
-            log.info("Starting embedded Codex Engine on port 8090...")
-            start_codex_server(port=8090, background=True)
-            import time
-            for _ in range(5):
-                try:
-                    resp = httpx.get("http://localhost:8090/health", timeout=1.0)
-                    if resp.status_code == 200:
-                        log.info("Embedded Codex Engine started successfully!")
-                        break
-                except Exception:
-                    time.sleep(1.0)
-        except Exception as e:
-            log.error("Failed to start embedded Codex Engine: %s", e)
+
+    local_url = os.getenv("LOCAL_CODEX_URL", "http://localhost:8090/v1")
+    parsed = urlparse(api_base or "")
+    target_port = parsed.port or int(os.getenv("LOCAL_CODEX_PORT", "8090"))
+    target_host = parsed.hostname or "127.0.0.1"
+
+    if str(target_port) not in api_base and api_base != local_url:
+        return
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            s.connect((target_host, target_port))
+            _last_server_check_ts = now
+            return
+    except Exception:
+        pass
+
+    if os.getenv("LOCAL_CODEX_EMBEDDED", "true").lower() == "false":
+        return
+
+    try:
+        from codex_engine import start_codex_server
+
+        log.info("Starting embedded Codex Engine on port %d...", target_port)
+        start_codex_server(port=target_port, background=True)
+        for _ in range(5):
+            try:
+                resp = httpx.get(f"http://{target_host}:{target_port}/health", timeout=1.0)
+                if resp.status_code == 200:
+                    _last_server_check_ts = time.monotonic()
+                    log.info("Embedded Codex Engine started successfully!")
+                    break
+            except Exception:
+                time.sleep(1.0)
+    except Exception as e:
+        log.error("Failed to start embedded Codex Engine: %s", e)
+
 
 class FallbackRunnable:
     def __init__(self, runnables: list):
         self.runnables = runnables
-
-    def invoke(self, input, config=None, **kwargs):
-        last_exception = None
-        for r in self.runnables:
-            try:
-                ensure_local_server(r)
-                return r.invoke(input, config=config, **kwargs)
-            except Exception as e:
-                log.warning("Fallback triggered: failed with %s. Trying next...", e)
-                last_exception = e
-        if last_exception:
-            raise last_exception
-        raise ValueError("No runnables in fallback chain")
 
     async def ainvoke(self, input, config=None, **kwargs):
         last_exception = None
@@ -186,16 +220,17 @@ class FallbackRunnable:
             raise last_exception
         raise ValueError("No runnables in fallback chain")
 
-from typing import Any, List, Optional
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_core.outputs import ChatResult, ChatGeneration
-from pathlib import Path
+    def invoke(self, input, config=None, **kwargs):
+        return _run_sync(self.ainvoke(input, config=config, **kwargs))
+
+
+# ── G4F Free Web Model Adapter (Deduplicated Sync/Async) ────────────────────────
+
 
 class G4FChatModel(BaseChatModel):
     model_name: str
     tools: Optional[List[Any]] = None
-    
+
     def __init__(self, model_name: str, tools: Optional[List[Any]] = None, **kwargs):
         super().__init__(model_name=model_name, **kwargs)
         self.model_name = model_name
@@ -204,18 +239,10 @@ class G4FChatModel(BaseChatModel):
     def bind_tools(self, tools, **kwargs):
         return G4FChatModel(model_name=self.model_name, tools=tools)
 
-    def _generate(
-        self,
-        messages: List[BaseMessage],
-        stop: Optional[List[str]] = None,
-        run_manager: Optional[Any] = None,
-        **kwargs: Any,
-    ) -> ChatResult:
-        import g4f
-        from g4f.client import Client
-        import json
-        import uuid
-        
+    def _prepare_g4f_payload(self, messages: List[BaseMessage]) -> tuple[str, list[dict], Optional[list], list]:
+        """Shared payload preparation for both sync and async g4f execution."""
+        from g4f.Provider import OperaAria, Yqcloud
+
         g4f_messages = []
         for msg in messages:
             if isinstance(msg, SystemMessage):
@@ -228,32 +255,58 @@ class G4FChatModel(BaseChatModel):
                 role = "user"
             g4f_messages.append({"role": role, "content": msg.content})
 
-        g4f_model = self.model_name
-        if "gemini" in self.model_name.lower():
+        lower_name = self.model_name.lower()
+        if "gemini" in lower_name:
             g4f_model = "gemini-2.5-flash"
-        elif "claude" in self.model_name.lower():
+        elif "claude" in lower_name:
             g4f_model = "claude-3.5-sonnet"
-        elif "gpt-4" in self.model_name.lower():
+        elif "gpt-4" in lower_name and "mini" not in lower_name:
             g4f_model = "gpt-4o"
-        elif "gpt-3.5" in self.model_name.lower() or "mini" in self.model_name.lower():
+        elif "gpt-3.5" in lower_name or "mini" in lower_name:
             g4f_model = "gpt-4o-mini"
-
-        tools_arg = None
-        if self.tools:
-            from langchain_core.utils.function_calling import convert_to_openai_tool
-            tools_arg = [convert_to_openai_tool(t) for t in self.tools]
-
-        import concurrent.futures
-        import g4f
-        from g4f.Provider import Yqcloud, OperaAria
-        
-        if "gpt" in g4f_model.lower():
-            providers = [Yqcloud, OperaAria, None]
         else:
-            providers = [Yqcloud, None]
-            
+            g4f_model = self.model_name
+
+        tools_arg = [convert_to_openai_tool(t) for t in self.tools] if self.tools else None
+        providers = [Yqcloud, OperaAria, None] if "gpt" in g4f_model.lower() else [Yqcloud, None]
+        return g4f_model, g4f_messages, tools_arg, providers
+
+    @staticmethod
+    def _parse_g4f_response(response: Any) -> ChatResult:
+        """Shared parser converting a g4f completion response into a LangChain ChatResult."""
+        choice = response.choices[0]
+        content = choice.message.content or ""
+
+        tool_calls = []
+        if hasattr(choice.message, "tool_calls") and choice.message.tool_calls:
+            for tc in choice.message.tool_calls:
+                try:
+                    raw_args = tc.function.arguments
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                    tool_calls.append({
+                        "name": tc.function.name,
+                        "args": args,
+                        "id": tc.id or f"call_{uuid.uuid4().hex}",
+                    })
+                except Exception:
+                    pass
+
+        ai_message = AIMessage(content=content, tool_calls=tool_calls)
+        return ChatResult(generations=[ChatGeneration(message=ai_message)])
+
+    def _generate(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        from g4f.client import Client
+
+        g4f_model, g4f_messages, tools_arg, providers = self._prepare_g4f_payload(messages)
         response = None
         last_exception = None
+
         for prov in providers:
             try:
                 client = Client()
@@ -265,12 +318,9 @@ class G4FChatModel(BaseChatModel):
                 if prov is not None:
                     call_kwargs["provider"] = prov
                 call_kwargs.update(kwargs)
-                
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(
-                        client.chat.completions.create,
-                        **call_kwargs
-                    )
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(client.chat.completions.create, **call_kwargs)
                     response = future.result(timeout=15.0)
                 if response and response.choices and response.choices[0].message.content:
                     break
@@ -278,35 +328,13 @@ class G4FChatModel(BaseChatModel):
                 prov_name = prov.__name__ if prov else "default"
                 log.warning("g4f _generate provider %s failed: %s", prov_name, e)
                 last_exception = e
-                
+
         if not response:
             if last_exception:
                 raise last_exception
             raise ValueError("All g4f providers failed")
-            
-        try:
-            choice = response.choices[0]
-            content = choice.message.content or ""
-            
-            tool_calls = []
-            if hasattr(choice.message, "tool_calls") and choice.message.tool_calls:
-                for tc in choice.message.tool_calls:
-                    try:
-                        args = json.loads(tc.function.arguments) if isinstance(tc.function.arguments, str) else tc.function.arguments
-                        tool_calls.append({
-                            "name": tc.function.name,
-                            "args": args,
-                            "id": tc.id or f"call_{uuid.uuid4().hex}"
-                        })
-                    except Exception:
-                        pass
-            
-            ai_message = AIMessage(content=content, tool_calls=tool_calls)
-        except Exception as e:
-            log.error("g4f _generate parsing error: %s", e)
-            raise e
-            
-        return ChatResult(generations=[ChatGeneration(message=ai_message)])
+
+        return self._parse_g4f_response(response)
 
     async def _agenerate(
         self,
@@ -315,49 +343,12 @@ class G4FChatModel(BaseChatModel):
         run_manager: Optional[Any] = None,
         **kwargs: Any,
     ) -> ChatResult:
-        import g4f
         from g4f.client import AsyncClient
-        import json
-        import uuid
-        
-        g4f_messages = []
-        for msg in messages:
-            if isinstance(msg, SystemMessage):
-                role = "system"
-            elif isinstance(msg, HumanMessage):
-                role = "user"
-            elif isinstance(msg, AIMessage):
-                role = "assistant"
-            else:
-                role = "user"
-            g4f_messages.append({"role": role, "content": msg.content})
 
-        g4f_model = self.model_name
-        if "gemini" in self.model_name.lower():
-            g4f_model = "gemini-2.5-flash"
-        elif "claude" in self.model_name.lower():
-            g4f_model = "claude-3.5-sonnet"
-        elif "gpt-4" in self.model_name.lower():
-            g4f_model = "gpt-4o"
-        elif "gpt-3.5" in self.model_name.lower() or "mini" in self.model_name.lower():
-            g4f_model = "gpt-4o-mini"
-
-        tools_arg = None
-        if self.tools:
-            from langchain_core.utils.function_calling import convert_to_openai_tool
-            tools_arg = [convert_to_openai_tool(t) for t in self.tools]
-
-        import asyncio
-        import g4f
-        from g4f.Provider import Yqcloud, OperaAria
-        
-        if "gpt" in g4f_model.lower():
-            providers = [Yqcloud, OperaAria, None]
-        else:
-            providers = [Yqcloud, None]
-            
+        g4f_model, g4f_messages, tools_arg, providers = self._prepare_g4f_payload(messages)
         response = None
         last_exception = None
+
         for prov in providers:
             try:
                 client = AsyncClient()
@@ -369,10 +360,10 @@ class G4FChatModel(BaseChatModel):
                 if prov is not None:
                     call_kwargs["provider"] = prov
                 call_kwargs.update(kwargs)
-                
+
                 response = await asyncio.wait_for(
                     client.chat.completions.create(**call_kwargs),
-                    timeout=15.0
+                    timeout=15.0,
                 )
                 if response and response.choices and response.choices[0].message.content:
                     break
@@ -380,108 +371,35 @@ class G4FChatModel(BaseChatModel):
                 prov_name = prov.__name__ if prov else "default"
                 log.warning("g4f _agenerate provider %s failed: %s", prov_name, e)
                 last_exception = e
-                
+
         if not response:
             if last_exception:
                 raise last_exception
             raise ValueError("All g4f async providers failed")
-            
-        try:
-            choice = response.choices[0]
-            content = choice.message.content or ""
-            
-            tool_calls = []
-            if hasattr(choice.message, "tool_calls") and choice.message.tool_calls:
-                for tc in choice.message.tool_calls:
-                    try:
-                        args = json.loads(tc.function.arguments) if isinstance(tc.function.arguments, str) else tc.function.arguments
-                        tool_calls.append({
-                            "name": tc.function.name,
-                            "args": args,
-                            "id": tc.id or f"call_{uuid.uuid4().hex}"
-                        })
-                    except Exception:
-                        pass
-            
-            ai_message = AIMessage(content=content, tool_calls=tool_calls)
-        except Exception as e:
-            log.error("g4f _agenerate parsing error: %s", e)
-            raise e
-            
-        return ChatResult(generations=[ChatGeneration(message=ai_message)])
 
-    def with_structured_output(self, schema, **kwargs):
-        from pydantic import BaseModel
-        import json
-        import re
-
-        def parse_output(response_message) -> Any:
-            content = response_message.content.strip()
-            json_match = re.search(r"```json\s*(.*?)\s*```", content, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(1)
-            else:
-                json_match = re.search(r"```\s*(.*?)\s*```", content, re.DOTALL)
-                if json_match:
-                    json_str = json_match.group(1)
-                else:
-                    start = content.find('{')
-                    end = content.rfind('}')
-                    if start != -1 and end != -1:
-                        json_str = content[start:end+1]
-                    else:
-                        json_str = content
-            
-            try:
-                data = json.loads(json_str)
-                if issubclass(schema, BaseModel):
-                    return schema(**data)
-                return data
-            except Exception as e:
-                log.warning("Structured output parsing failed: %s, raw content: %s", e, content)
-                if issubclass(schema, BaseModel):
-                    from pydantic_core import PydanticUndefined
-                    defaults = {}
-                    for field_name, field in schema.model_fields.items():
-                        if field.default is not None and field.default is not PydanticUndefined:
-                            defaults[field_name] = field.default
-                        elif field.default_factory is not None:
-                            defaults[field_name] = field.default_factory()
-                        else:
-                            if getattr(field.annotation, "__origin__", None) is Literal:
-                                defaults[field_name] = field.annotation.__args__[0]
-                            else:
-                                defaults[field_name] = "FINISH"
-                    return schema(**defaults)
-                return {}
-
-        system_instruction = f"Output must be a valid JSON object matching the schema: {schema.schema_json() if hasattr(schema, 'schema_json') else schema.model_json_schema()}"
-        
-        class StructuredModel:
-            def __init__(self, model):
-                self.model = model
-            async def ainvoke(self, messages, config=None, **kwargs):
-                new_messages = [SystemMessage(content=system_instruction)] + list(messages)
-                res = await self.model.ainvoke(new_messages, **kwargs)
-                return parse_output(res)
-            def invoke(self, messages, config=None, **kwargs):
-                new_messages = [SystemMessage(content=system_instruction)] + list(messages)
-                res = self.model.invoke(new_messages, **kwargs)
-                return parse_output(res)
-
-        return StructuredModel(self)
+        return self._parse_g4f_response(response)
 
     @property
     def _llm_type(self) -> str:
         return "g4f"
 
-# ── Dynamic Configuration, Token Tracking & Context Pruning ──────────────────────────
+
+# ── Dynamic Configuration, Token Tracking & Context Pruning ──────────────────────
+
 
 def get_local_env_settings() -> dict:
     """Helper to build settings from environment variables for local/offline execution."""
     providers = ["openai", "gemini", "anthropic"]
+    preferred = os.getenv("SENIOR_MODEL_PROVIDER", "").strip().lower()
+    if preferred in providers:
+        providers = [preferred] + [p for p in providers if p != preferred]
+
     return {
-        "active_mode": "paid" if os.getenv("USE_PAID_API", "false").lower() == "true" else ("free" if os.getenv("USE_FREE_VERSIONS", "true").lower() == "true" else "local"),
+        "active_mode": (
+            "paid"
+            if os.getenv("USE_PAID_API", "false").lower() == "true"
+            else ("free" if os.getenv("USE_FREE_VERSIONS", "true").lower() == "true" else "local")
+        ),
         "selected_providers": providers,
         "openai_api_key": os.getenv("OPENAI_API_KEY", ""),
         "anthropic_api_key": os.getenv("ANTHROPIC_API_KEY", ""),
@@ -489,18 +407,15 @@ def get_local_env_settings() -> dict:
         "token_budget": int(os.getenv("TOKEN_BUDGET", "100000")),
         "token_used": int(os.getenv("TOKEN_USED", "0")),
         "token_warning_threshold": 0.90,
-        "token_warning_sent": False,
         "token_auto_fallback": True,
         "local_max_context_tokens": int(os.getenv("LOCAL_MAX_CONTEXT_TOKENS", "2048")),
         "local_auto_delete": True,
-        "language": "en"
+        "language": "en",
     }
+
 
 def prune_messages_to_limit(messages: list, limit: int, user_id: int | None) -> tuple[list, list]:
     """Prunes oldest messages if total tokens exceed limit, saving pruned logs locally."""
-    from settings_manager import estimate_tokens
-    import json
-    
     system_msgs = []
     chat_msgs = []
     for m in messages:
@@ -508,14 +423,14 @@ def prune_messages_to_limit(messages: list, limit: int, user_id: int | None) -> 
             system_msgs.append(m)
         else:
             chat_msgs.append(m)
-            
-    def total_tokens(sys, chat):
-        return estimate_tokens("".join(getattr(m, "content", "") or "" for m in sys + chat))
-        
+
+    def total_tokens(sys_m, chat_m):
+        return estimate_tokens("".join(getattr(m, "content", "") or "" for m in sys_m + chat_m))
+
     pruned = []
     while total_tokens(system_msgs, chat_msgs) > limit and len(chat_msgs) > 0:
         pruned.append(chat_msgs.pop(0))
-        
+
     if pruned:
         pruned_dicts = []
         for m in pruned:
@@ -528,12 +443,12 @@ def prune_messages_to_limit(messages: list, limit: int, user_id: int | None) -> 
                 "role": role,
                 "content": getattr(m, "content", "") or "",
                 "name": getattr(m, "name", None),
-                "tool_calls": getattr(m, "tool_calls", None)
+                "tool_calls": getattr(m, "tool_calls", None),
             })
-            
+
         filename = f"pruned_history_{user_id}.json" if user_id else "pruned_history.json"
         filepath = Path(os.getcwd()) / filename
-        
+
         existing = []
         if filepath.exists():
             try:
@@ -542,13 +457,26 @@ def prune_messages_to_limit(messages: list, limit: int, user_id: int | None) -> 
                 pass
         existing.extend(pruned_dicts)
         filepath.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-        log.info("Local model context limit reached. Pruned %s oldest messages and archived to %s", len(pruned), filename)
-        
+        log.info(
+            "Local model context limit reached. Pruned %s oldest messages and archived to %s",
+            len(pruned),
+            filename,
+        )
+
     return system_msgs + chat_msgs, pruned
+
 
 class TokenTrackingModel:
     """Wrapper that estimates tokens consumed, logs them to settings, and truncates local context."""
-    def __init__(self, bound_model, user_id: int | None, is_local: bool = False, max_context: int = 2048, auto_delete: bool = True):
+
+    def __init__(
+        self,
+        bound_model,
+        user_id: int | None,
+        is_local: bool = False,
+        max_context: int = 2048,
+        auto_delete: bool = True,
+    ):
         self.bound_model = bound_model
         self.user_id = user_id
         self.is_local = is_local
@@ -556,223 +484,74 @@ class TokenTrackingModel:
         self.auto_delete = auto_delete
 
     async def ainvoke(self, messages, config=None, **kwargs):
-        from settings_manager import estimate_tokens, add_user_tokens
-        
-        # 1. Truncate context if local
         if self.is_local:
             messages_to_use, pruned = prune_messages_to_limit(messages, self.max_context, self.user_id)
             if not self.auto_delete and pruned:
                 raise ValueError("LOCAL_CONTEXT_WINDOW_EXCEEDED")
             messages = messages_to_use
 
-        # 2. Count input tokens
-        input_text = ""
         if isinstance(messages, list):
-            for m in messages:
-                input_text += getattr(m, "content", "") or ""
+            input_text = "".join(getattr(m, "content", "") or "" for m in messages)
         else:
             input_text = str(messages)
         input_tokens = estimate_tokens(input_text)
 
-        # 3. Call model
         res = await self.bound_model.ainvoke(messages, config=config, **kwargs)
 
-        # 4. Count output tokens
         output_text = getattr(res, "content", "") or ""
         output_tokens = estimate_tokens(output_text)
-        
+
         total_tokens = input_tokens + output_tokens
         if self.user_id:
             await add_user_tokens(self.user_id, total_tokens)
         else:
             log.info("Local session consumed %s tokens.", total_tokens)
-            
+
         return res
 
     def invoke(self, messages, config=None, **kwargs):
-        from settings_manager import estimate_tokens
-        if self.is_local:
-            messages_to_use, pruned = prune_messages_to_limit(messages, self.max_context, self.user_id)
-            if not self.auto_delete and pruned:
-                raise ValueError("LOCAL_CONTEXT_WINDOW_EXCEEDED")
-            messages = messages_to_use
+        return _run_sync(self.ainvoke(messages, config=config, **kwargs))
 
-        input_text = ""
-        if isinstance(messages, list):
-            for m in messages:
-                input_text += getattr(m, "content", "") or ""
-        else:
-            input_text = str(messages)
-        input_tokens = estimate_tokens(input_text)
 
-        res = self.bound_model.invoke(messages, config=config, **kwargs)
+# ── Unified Structured Output Wrapper ───────────────────────────────────────────
 
-        output_text = getattr(res, "content", "") or ""
-        output_tokens = estimate_tokens(output_text)
-        
-        total_tokens = input_tokens + output_tokens
-        if self.user_id:
-            from settings_manager import add_user_tokens
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(add_user_tokens(self.user_id, total_tokens))
-                else:
-                    asyncio.run(add_user_tokens(self.user_id, total_tokens))
-            except Exception:
-                pass
-        else:
-            log.info("Local session consumed %s tokens.", total_tokens)
-            
-        return res
-
-# ── Dynamic Model Retrieval ───────────────────────────────────────────────────────
-
-async def get_agent_llm(agent_name: str, config, tools=None, structured_schema=None):
-    """
-    Builds the model fallback chain dynamically based on the current user's settings.
-    Integrates TokenTrackingModel wrapper per runnable.
-    """
-    from settings_manager import get_user_settings
-    
-    configurable = config.get("configurable", {}) if config else {}
-    user_id = configurable.get("user_id")
-    
-    if user_id:
-        settings = await get_user_settings(user_id)
-    else:
-        settings = get_local_env_settings()
-
-    active_mode = settings["active_mode"]
-    providers = settings["selected_providers"]
-    max_context = settings.get("local_max_context_tokens", 2048)
-    auto_delete = settings.get("local_auto_delete", True)
-
-    chain = []
-    
-    def _prepare(model):
-        if tools:
-            model = model.bind_tools(tools)
-        if structured_schema:
-            if hasattr(model, "_llm_type") and model._llm_type == "g4f":
-                model = model.with_structured_output(structured_schema)
-            else:
-                model = wrap_robust_structured_output(model, structured_schema)
-        is_local = (active_mode == "local")
-        return TokenTrackingModel(model, user_id, is_local=is_local, max_context=max_context, auto_delete=auto_delete)
-
-    # 1. Local Codex mode
-    if active_mode == "local":
-        local_url = os.getenv("LOCAL_CODEX_URL", "http://localhost:8090/v1")
-        model = ChatOpenAI(
-            base_url=local_url,
-            model=os.getenv("LOCAL_CODEX_MODEL", "qwen2.5-coder-7b-instruct"),
-            api_key="not-needed",
-            temperature=0.1,
-            max_tokens=4096,
-        )
-        ensure_local_server(model)
-        chain.append(_prepare(model))
-        
-    # 2. Paid API mode
-    elif active_mode == "paid":
-        if "openai" in providers and _is_valid_key(settings["openai_api_key"]):
-            if ChatOpenAI is None:
-                log.warning("ChatOpenAI requested but langchain-openai is not installed/working.")
-            else:
-                model_name = "gpt-4o" if agent_name in ("codex", "research", "supervisor") else "gpt-4o-mini"
-                chain.append(_prepare(ChatOpenAI(
-                    model=model_name,
-                    api_key=settings["openai_api_key"],
-                    temperature=0.1 if agent_name != "routing" else 0.0,
-                )))
-        if "anthropic" in providers and _is_valid_key(settings["anthropic_api_key"]):
-            if ChatAnthropic is None:
-                log.warning("ChatAnthropic requested but langchain-anthropic is not installed/working.")
-            else:
-                model_name = "claude-3-7-sonnet-latest" if agent_name in ("codex", "research", "supervisor") else "claude-3-5-haiku-20241022"
-                chain.append(_prepare(ChatAnthropic(
-                    model=model_name,
-                    api_key=settings["anthropic_api_key"],
-                    temperature=0.1 if agent_name != "routing" else 0.0,
-                )))
-        if "gemini" in providers and _is_valid_key(settings["gemini_api_key"]):
-            if ChatGoogleGenerativeAI is None:
-                log.warning("ChatGoogleGenerativeAI requested but langchain-google-genai is not installed/working.")
-            else:
-                model_name = "gemini-2.5-pro" if agent_name in ("codex", "research", "supervisor") else "gemini-2.5-flash"
-                chain.append(_prepare(ChatGoogleGenerativeAI(
-                    model=model_name,
-                    api_key=settings["gemini_api_key"],
-                    temperature=0.1 if agent_name != "routing" else 0.0,
-                )))
-            
-        if not chain:
-            chain.append(TokenTrackingModel(MissingAPIKeysModel(), user_id))
-
-    # 3. Free API mode (g4f web scrapers)
-    else:
-        try:
-            import g4f
-            if "openai" in providers:
-                model_name = "gpt-4o" if agent_name in ("codex", "research", "supervisor") else "gpt-4o-mini"
-                chain.append(_prepare(G4FChatModel(model_name=model_name)))
-            if "anthropic" in providers:
-                chain.append(_prepare(G4FChatModel(model_name="claude-3.5-sonnet")))
-            if "gemini" in providers:
-                model_name = "gemini-2.5-pro" if agent_name in ("codex", "research", "supervisor") else "gemini-2.5-flash"
-                chain.append(_prepare(G4FChatModel(model_name=model_name)))
-        except ImportError:
-            pass
-            
-        if ChatOpenAI is not None:
-            local_url = os.getenv("LOCAL_CODEX_URL", "http://localhost:8090/v1")
-            local_model = ChatOpenAI(
-                base_url=local_url,
-                model=os.getenv("LOCAL_CODEX_MODEL", "qwen2.5-coder-7b-instruct"),
-                api_key="not-needed",
-                temperature=0.1,
-                max_tokens=4096,
-            )
-            chain.append(_prepare(local_model))
-        else:
-            log.warning("ChatOpenAI is not available. Local Codex model will not be added to fallbacks.")
-
-    if len(chain) > 1:
-        return FallbackRunnable(chain)
-    return chain[0]
 
 def wrap_robust_structured_output(model, schema):
-    from pydantic import BaseModel
-    import json
-    import re
-    
+    """
+    Unified structured-output wrapper used across all LLM backends (including G4FChatModel).
+    Includes heuristic `Route` recovery when local/free models emit raw tool names instead of JSON.
+    """
+
     def parse_output(response_message) -> Any:
-        content = response_message.content.strip()
-        
-        # Heuristic check for local model outputting tool call format instead of Route JSON
+        content = (getattr(response_message, "content", "") or "").strip()
+
         if schema.__name__ == "Route":
             content_lower = content.lower()
             reasoning = f"Heuristic override based on model content: {content[:100]}"
-            
-            # DB tools
-            db_keywords = ["save_code_snippet", "get_snippets", "log_improvement", "save_snippet"]
+
+            db_keywords = ("save_code_snippet", "get_snippets", "log_improvement", "save_snippet")
             if any(kw in content_lower for kw in db_keywords):
                 log.info("Heuristically routing to DBAgent because model outputted: %s", content)
                 return schema(next="DBAgent", reasoning=reasoning)
-                
-            # Research tools
-            research_keywords = ["web_search", "scrape_page", "search_algorithms"]
+
+            research_keywords = ("web_search", "scrape_page", "search_algorithms")
             if any(kw in content_lower for kw in research_keywords):
                 log.info("Heuristically routing to ResearchAgent because model outputted: %s", content)
                 return schema(next="ResearchAgent", reasoning=reasoning)
-                
-            # Codex tools (explicit keywords OR any functions. prefix)
-            codex_keywords = [
-                "write_file", "patch_file", "read_file", "execute_code", "run_tests", 
-                "list_directory", "search_codebase", "run_shell_command", "index_repo", "delete_file", "append_to_file"
-            ]
+
+            codex_keywords = (
+                "write_file",
+                "patch_file",
+                "read_file",
+                "execute_code",
+                "run_tests",
+                "list_directory",
+                "search_codebase",
+                "run_shell_command",
+                "index_repo",
+                "delete_file",
+                "append_to_file",
+            )
             if "functions." in content_lower or any(kw in content_lower for kw in codex_keywords):
                 log.info("Heuristically routing to CodexEngine because model outputted: %s", content)
                 return schema(next="CodexEngine", reasoning=reasoning)
@@ -785,13 +564,13 @@ def wrap_robust_structured_output(model, schema):
             if json_match:
                 json_str = json_match.group(1)
             else:
-                start = content.find('{')
-                end = content.rfind('}')
+                start = content.find("{")
+                end = content.rfind("}")
                 if start != -1 and end != -1:
-                    json_str = content[start:end+1]
+                    json_str = content[start : end + 1]
                 else:
                     json_str = content
-        
+
         try:
             data = json.loads(json_str)
             if issubclass(schema, BaseModel):
@@ -800,7 +579,6 @@ def wrap_robust_structured_output(model, schema):
         except Exception as e:
             log.warning("Structured output parsing failed: %s, raw content: %s", e, content)
             if issubclass(schema, BaseModel):
-                from pydantic_core import PydanticUndefined
                 defaults = {}
                 for field_name, field in schema.model_fields.items():
                     if field.default is not None and field.default is not PydanticUndefined:
@@ -815,37 +593,182 @@ def wrap_robust_structured_output(model, schema):
                 return schema(**defaults)
             return {}
 
-    system_instruction = f"Output must be a valid JSON object matching the schema: {schema.schema_json() if hasattr(schema, 'schema_json') else schema.model_json_schema()}"
-    
+    schema_repr = schema.model_json_schema() if hasattr(schema, "model_json_schema") else schema.schema_json()
+    system_instruction = f"Output must be a valid JSON object matching the schema: {schema_repr}"
+
     class RobustStructuredModel:
         def __init__(self, bound_model):
             self.bound_model = bound_model
-            
+
         async def ainvoke(self, messages, config=None, **kwargs):
-            from langchain_core.messages import SystemMessage
             new_messages = [SystemMessage(content=system_instruction)] + list(messages)
-            res = await self.bound_model.ainvoke(new_messages, **kwargs)
+            res = await self.bound_model.ainvoke(new_messages, config=config, **kwargs)
             return parse_output(res)
-            
+
         def invoke(self, messages, config=None, **kwargs):
-            from langchain_core.messages import SystemMessage
-            new_messages = [SystemMessage(content=system_instruction)] + list(messages)
-            res = self.bound_model.invoke(new_messages, **kwargs)
-            return parse_output(res)
-            
+            return _run_sync(self.ainvoke(messages, config=config, **kwargs))
+
     return RobustStructuredModel(model)
 
-# LLMs will be instantiated dynamically inside the nodes now
 
-# ── State ───────────────────────────────────────────────────────────────────────
+# ── Dynamic Model Retrieval ─────────────────────────────────────────────────────
+
+
+def _resolve_model_names(agent_name: str) -> dict[str, str]:
+    """Resolve model names per provider from environment variables with sensible defaults."""
+    is_senior = agent_name in ("codex", "research", "supervisor")
+    return {
+        "openai": (
+            os.getenv("OPENAI_MODEL", "gpt-4o")
+            if is_senior
+            else os.getenv("OPENAI_FAST_MODEL", "gpt-4o-mini")
+        ),
+        "anthropic": (
+            os.getenv("ANTHROPIC_MODEL", "claude-3-7-sonnet-latest")
+            if is_senior
+            else os.getenv("ANTHROPIC_FAST_MODEL", "claude-3-5-haiku-20241022")
+        ),
+        "gemini": (
+            os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
+            if is_senior
+            else os.getenv("GEMINI_FAST_MODEL", "gemini-2.5-flash")
+        ),
+    }
+
+
+def _order_providers(providers: list[str]) -> list[str]:
+    """Order selected providers so `SENIOR_MODEL_PROVIDER` is attempted first if enabled."""
+    preferred = os.getenv("SENIOR_MODEL_PROVIDER", "").strip().lower()
+    if preferred and preferred in providers:
+        return [preferred] + [p for p in providers if p != preferred]
+    return list(providers)
+
+
+async def get_agent_llm(agent_name: str, config, tools=None, structured_schema=None):
+    """
+    Builds the model fallback chain dynamically based on the current user's settings
+    and environment variables. Integrates TokenTrackingModel wrapper per runnable.
+    """
+    configurable = config.get("configurable", {}) if config else {}
+    user_id = configurable.get("user_id")
+
+    if user_id:
+        settings = await get_user_settings(user_id)
+    else:
+        settings = get_local_env_settings()
+
+    active_mode = settings["active_mode"]
+    providers = _order_providers(settings["selected_providers"])
+    max_context = settings.get("local_max_context_tokens", 2048)
+    auto_delete = settings.get("local_auto_delete", True)
+    model_names = _resolve_model_names(agent_name)
+    local_codex_enabled = os.getenv("LOCAL_CODEX", "true").lower() != "false"
+
+    chain = []
+
+    def _prepare(model, is_local_model: bool = False):
+        if tools:
+            model = model.bind_tools(tools)
+        if structured_schema:
+            model = wrap_robust_structured_output(model, structured_schema)
+        return TokenTrackingModel(
+            model,
+            user_id,
+            is_local=is_local_model or (active_mode == "local"),
+            max_context=max_context,
+            auto_delete=auto_delete,
+        )
+
+    def _build_local_model():
+        local_url = os.getenv("LOCAL_CODEX_URL", "http://localhost:8090/v1")
+        return ChatOpenAI(
+            base_url=local_url,
+            model=os.getenv("LOCAL_CODEX_MODEL", "qwen2.5-coder-7b-instruct"),
+            api_key="not-needed",
+            temperature=0.1,
+            max_tokens=4096,
+        )
+
+    # 1. Local Codex mode
+    if active_mode == "local":
+        model = _build_local_model()
+        ensure_local_server(model)
+        chain.append(_prepare(model, is_local_model=True))
+
+    # 2. Paid API mode
+    elif active_mode == "paid":
+        temp = 0.0 if agent_name == "routing" else 0.1
+        for prov in providers:
+            if prov == "openai" and _is_valid_key(settings["openai_api_key"]):
+                if ChatOpenAI is None:
+                    log.warning("ChatOpenAI requested but langchain-openai is not installed.")
+                else:
+                    chain.append(
+                        _prepare(
+                            ChatOpenAI(
+                                model=model_names["openai"],
+                                api_key=settings["openai_api_key"],
+                                temperature=temp,
+                            )
+                        )
+                    )
+            elif prov == "anthropic" and _is_valid_key(settings["anthropic_api_key"]):
+                if ChatAnthropic is None:
+                    log.warning("ChatAnthropic requested but langchain-anthropic is not installed.")
+                else:
+                    chain.append(
+                        _prepare(
+                            ChatAnthropic(
+                                model=model_names["anthropic"],
+                                api_key=settings["anthropic_api_key"],
+                                temperature=temp,
+                            )
+                        )
+                    )
+            elif prov == "gemini" and _is_valid_key(settings["gemini_api_key"]):
+                if ChatGoogleGenerativeAI is None:
+                    log.warning("ChatGoogleGenerativeAI requested but langchain-google-genai is not installed.")
+                else:
+                    chain.append(
+                        _prepare(
+                            ChatGoogleGenerativeAI(
+                                model=model_names["gemini"],
+                                api_key=settings["gemini_api_key"],
+                                temperature=temp,
+                            )
+                        )
+                    )
+
+        if not chain:
+            chain.append(TokenTrackingModel(MissingAPIKeysModel(), user_id))
+
+    # 3. Free API mode (g4f web models + optional local Codex fallback)
+    else:
+        import importlib.util
+
+        if importlib.util.find_spec("g4f") is not None:
+            for prov in providers:
+                if prov in model_names:
+                    chain.append(_prepare(G4FChatModel(model_name=model_names[prov])))
+
+        if local_codex_enabled and ChatOpenAI is not None:
+            chain.append(_prepare(_build_local_model(), is_local_model=True))
+        elif not chain:
+            chain.append(TokenTrackingModel(MissingAPIKeysModel(), user_id))
+
+    if len(chain) > 1:
+        return FallbackRunnable(chain)
+    return chain[0]
+
+
+# ── State & Routing Schema ──────────────────────────────────────────────────────
+
 
 class AgentState(TypedDict):
-    messages:   Annotated[Sequence[BaseMessage], operator.add]
-    next:       str
-    iterations: int   # supervisor routing budget (resets per ainvoke)
+    messages: Annotated[Sequence[BaseMessage], operator.add]
+    next: str
+    iterations: int  # supervisor routing budget (resets per ainvoke)
 
-
-# ── Routing schema ──────────────────────────────────────────────────────────────
 
 class Route(BaseModel):
     next: Literal["FINISH", "CodexEngine", "ResearchAgent", "DBAgent"] = Field(
@@ -854,7 +777,7 @@ class Route(BaseModel):
     reasoning: str = Field(description="One-sentence explanation for this routing decision.")
 
 
-# ── System prompts ──────────────────────────────────────────────────────────────
+# ── System Prompts ──────────────────────────────────────────────────────────────
 
 COMMENTER_ROUTING_PROMPT = """You are the Commenter — a senior software engineer \
 orchestrating a developer productivity assistant.
@@ -984,36 +907,28 @@ DB_SYSTEM_PROMPT = """You are the DB Agent — persistent memory for the develop
 Always confirm what was saved/retrieved/logged with the relevant details."""
 
 
-# ── Safety limits ───────────────────────────────────────────────────────────────
+# ── Safety Limits & Tool Maps ───────────────────────────────────────────────────
 
-MAX_SUPERVISOR_ITERATIONS = 6   # max specialist invocations per user turn
-CODEX_MAX_STEPS           = 12  # max ReAct steps inside one Codex invocation
-DEFAULT_MAX_STEPS         = 6   # max ReAct steps for Research / DB agents
+MAX_SUPERVISOR_ITERATIONS = 6
+CODEX_MAX_STEPS = 12
+DEFAULT_MAX_STEPS = 6
 
+codex_tools = [
+    execute_code,
+    analyze_code,
+    read_file,
+    list_directory,
+    write_file,
+    patch_file,
+    search_codebase,
+    run_tests,
+    run_shell_command,
+    index_repo,
+]
+research_tools = [web_search, scrape_page, search_algorithms]
+db_tools = [save_code_snippet, get_snippets, log_improvement]
 
-# ── Tool maps ────────────────────────────────────────────────────────────────────
-
-_ALL_TOOLS = {
-    # Codex
-    "execute_code":      execute_code,
-    "analyze_code":      analyze_code,
-    "read_file":         read_file,
-    "list_directory":    list_directory,
-    "write_file":        write_file,
-    "patch_file":        patch_file,
-    "search_codebase":   search_codebase,
-    "run_tests":         run_tests,
-    "run_shell_command": run_shell_command,
-    "index_repo":        index_repo,
-    # Research
-    "web_search":        web_search,
-    "scrape_page":       scrape_page,
-    "search_algorithms": search_algorithms,
-    # DB
-    "save_code_snippet": save_code_snippet,
-    "get_snippets":      get_snippets,
-    "log_improvement":   log_improvement,
-}
+_ALL_TOOLS = {t.name: t for t in (codex_tools + research_tools + db_tools)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1040,103 +955,35 @@ async def worker_node(
 ) -> dict:
     """
     ReAct (Reason + Act) loop with optional persistent Memory Tokens.
-
-    When use_memory=True (Codex), a **planning pass** is enforced on the
-    first iteration: the LLM must output a plan with NO tool calls before
-    it starts acting.  This prevents wasted steps on complex tasks.
     """
     conversation = list(state["messages"])
-    working:  list[BaseMessage] = []
+    working: list[BaseMessage] = []
     steps = 0
-    plan_done = False
 
-    # Dynamic LLM resolution
-    tools = []
-    if agent_name == "codex":
-        tools = codex_tools
-    elif agent_name == "research":
-        tools = research_tools
-    elif agent_name == "db":
-        tools = db_tools
+    tools = (
+        codex_tools
+        if agent_name == "codex"
+        else (research_tools if agent_name == "research" else (db_tools if agent_name == "db" else []))
+    )
 
     agent_llm = await get_agent_llm(agent_name, config, tools=tools)
-    routing_llm = await get_agent_llm("routing", config)
-
-    # Load memory if this agent uses it (e.g. Codex)
+    routing_llm = await get_agent_llm("routing", config) if use_memory else None
     memory_state = load_memory() if use_memory else None
 
-    # ── PLANNING PASS (Codex only) ──────────────────────────────────────────
-    if use_memory:
-        memory_sys_msg = [memory_to_system_message(memory_state)] if memory_state else []
-        plan_prompt = system_prompt + "\n\n" + PLANNING_INJECTION
-
-        plan_response: AIMessage = await agent_llm.ainvoke(
-            [SystemMessage(content=plan_prompt)] + memory_sys_msg + conversation
-        )
-        working.append(plan_response)
-        plan_done = True
-        log.info("Codex planning pass completed — plan: %s", plan_response.content[:200])
-
-        # If the LLM ignored us and made tool calls in the plan, that's fine —
-        # treat it as step 1 of the ReAct loop (don't double-count).
-        if plan_response.tool_calls:
-            steps += 1
-            tool_results: list[ToolMessage] = []
-            for tc in plan_response.tool_calls:
-                tool_fn = _ALL_TOOLS.get(tc["name"])
-                if tool_fn is None:
-                    result_content = f"Unknown tool: '{tc['name']}'"
-                else:
-                    try:
-                        result_content = str(await tool_fn.ainvoke(tc["args"]))
-                    except Exception as e:
-                        result_content = f"Tool error in '{tc['name']}': {repr(e)}"
-                if memory_state is not None:
-                    memory_state = await update_memory(
-                        current=memory_state,
-                        tool_name=tc["name"],
-                        tool_input=str(tc["args"]),
-                        tool_result=result_content,
-                        compressor_llm=routing_llm,
-                    )
-                tool_results.append(ToolMessage(
-                    content=result_content, name=tc["name"], tool_call_id=tc["id"],
-                ))
-            working.extend(tool_results)
-
-    # ── MAIN ReAct LOOP ─────────────────────────────────────────────────────
-    while steps < max_steps:
-        steps += 1
-
-        # Inject memory tokens directly before inference
-        memory_sys_msg = []
-        if use_memory and memory_state is not None:
-            memory_sys_msg = [memory_to_system_message(memory_state)]
-
-        # Invoke the specialist
-        response: AIMessage = await agent_llm.ainvoke(
-            [SystemMessage(content=system_prompt)] + memory_sys_msg + conversation + working
-        )
-        working.append(response)
-
-        # No tool calls → LLM is done reasoning
-        if not response.tool_calls:
-            break
-
-        # Execute tools
-        tool_results: list[ToolMessage] = []
-        for tc in response.tool_calls:
+    async def _execute_tool_calls(tool_calls: list[dict]) -> list[ToolMessage]:
+        nonlocal memory_state
+        results: list[ToolMessage] = []
+        for tc in tool_calls:
             tool_fn = _ALL_TOOLS.get(tc["name"])
             if tool_fn is None:
                 result_content = f"Unknown tool: '{tc['name']}'"
             else:
                 try:
-                    result_content = str(await tool_fn.ainvoke(tc["args"]))
+                    result_content = str(await tool_fn.ainvoke(tc["args"], config=config))
                 except Exception as e:
                     result_content = f"Tool error in '{tc['name']}': {repr(e)}"
 
-            # COMPRESS AND UPDATE MEMORY TOKENS
-            if use_memory and memory_state is not None:
+            if use_memory and memory_state is not None and routing_llm is not None:
                 memory_state = await update_memory(
                     current=memory_state,
                     tool_name=tc["name"],
@@ -1145,20 +992,49 @@ async def worker_node(
                     compressor_llm=routing_llm,
                 )
 
-            tool_results.append(
+            results.append(
                 ToolMessage(
                     content=result_content,
                     name=tc["name"],
                     tool_call_id=tc["id"],
                 )
             )
+        return results
 
-        working.extend(tool_results)
+    # ── PLANNING PASS (Codex only) ──────────────────────────────────────────
+    if use_memory:
+        memory_sys_msg = [memory_to_system_message(memory_state)] if memory_state else []
+        plan_prompt = system_prompt + "\n\n" + PLANNING_INJECTION
 
-    if steps >= max_steps and working and getattr(working[-1], 'tool_calls', None):
-        working.append(AIMessage(
-            content=f"[{max_steps}-step limit reached. Reporting current state.]"
-        ))
+        plan_response: AIMessage = await agent_llm.ainvoke(
+            [SystemMessage(content=plan_prompt)] + memory_sys_msg + conversation,
+            config=config,
+        )
+        working.append(plan_response)
+        log.info("Codex planning pass completed — plan: %s", plan_response.content[:200])
+
+        if plan_response.tool_calls:
+            steps += 1
+            working.extend(await _execute_tool_calls(plan_response.tool_calls))
+
+    # ── MAIN ReAct LOOP ─────────────────────────────────────────────────────
+    while steps < max_steps:
+        steps += 1
+        memory_sys_msg = [memory_to_system_message(memory_state)] if (use_memory and memory_state) else []
+
+        response: AIMessage = await agent_llm.ainvoke(
+            [SystemMessage(content=system_prompt)] + memory_sys_msg + conversation + working,
+            config=config,
+        )
+        working.append(response)
+
+        if not response.tool_calls:
+            break
+
+        working.extend(await _execute_tool_calls(response.tool_calls))
+
+    if steps >= max_steps and working and getattr(working[-1], "tool_calls", None):
+        working.append(AIMessage(content=f"[{max_steps}-step limit reached. Reporting current state.]"))
 
     return {"messages": working}
 
@@ -1167,82 +1043,90 @@ async def worker_node(
 # Supervisor node
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 async def supervisor_node(state: AgentState, config: RunnableConfig) -> dict:
     """Commenter Supervisor: routes to specialists then writes the final synthesis."""
-    messages   = list(state["messages"])
+    messages = list(state["messages"])
     iterations = state.get("iterations", 0)
 
-    # Dynamic LLM resolution
     llm = await get_agent_llm("supervisor", config)
     routing_structured = await get_agent_llm("routing", config, structured_schema=Route)
 
-    # Safety: force synthesis if routing budget exhausted
     if iterations >= MAX_SUPERVISOR_ITERATIONS:
         final = await llm.ainvoke(
-            [SystemMessage(content=COMMENTER_SYNTHESIS_PROMPT)] + messages
+            [SystemMessage(content=COMMENTER_SYNTHESIS_PROMPT)] + messages,
+            config=config,
         )
         return {"messages": [final], "next": "FINISH", "iterations": iterations}
 
-    # Route using the faster flash model
     route = await routing_structured.ainvoke(
-        [SystemMessage(content=COMMENTER_ROUTING_PROMPT)] + messages
+        [SystemMessage(content=COMMENTER_ROUTING_PROMPT)] + messages,
+        config=config,
     )
     next_agent = route.next if isinstance(route, Route) else "FINISH"
 
     if next_agent == "FINISH":
         final = await llm.ainvoke(
-            [SystemMessage(content=COMMENTER_SYNTHESIS_PROMPT)] + messages
+            [SystemMessage(content=COMMENTER_SYNTHESIS_PROMPT)] + messages,
+            config=config,
         )
         return {"messages": [final], "next": "FINISH", "iterations": iterations + 1}
 
     return {"next": next_agent, "iterations": iterations + 1}
 
 
-# ── Bind tools to LLMs ──────────────────────────────────────────────────────────
-
-codex_tools    = [execute_code, analyze_code, read_file, list_directory,
-                  write_file, patch_file, search_codebase, run_tests,
-                  run_shell_command, index_repo]
-research_tools = [web_search, scrape_page, search_algorithms]
-db_tools       = [save_code_snippet, get_snippets, log_improvement]
-
-
-# ── Build graph ──────────────────────────────────────────────────────────────────
+# ── Build Graph ─────────────────────────────────────────────────────────────────
 
 workflow = StateGraph(AgentState)
 
-workflow.add_node("Supervisor",    supervisor_node)
-workflow.add_node("CodexEngine",   partial(worker_node, agent_name="codex",
-                                           system_prompt=CODEX_SYSTEM_PROMPT,
-                                           max_steps=CODEX_MAX_STEPS,
-                                           use_memory=True))
-workflow.add_node("ResearchAgent", partial(worker_node, agent_name="research",
-                                           system_prompt=RESEARCH_SYSTEM_PROMPT,
-                                           max_steps=DEFAULT_MAX_STEPS,
-                                           use_memory=False))
-workflow.add_node("DBAgent",       partial(worker_node, agent_name="db",
-                                           system_prompt=DB_SYSTEM_PROMPT,
-                                           max_steps=DEFAULT_MAX_STEPS,
-                                           use_memory=False))
+workflow.add_node("Supervisor", supervisor_node)
+workflow.add_node(
+    "CodexEngine",
+    partial(
+        worker_node,
+        agent_name="codex",
+        system_prompt=CODEX_SYSTEM_PROMPT,
+        max_steps=CODEX_MAX_STEPS,
+        use_memory=True,
+    ),
+)
+workflow.add_node(
+    "ResearchAgent",
+    partial(
+        worker_node,
+        agent_name="research",
+        system_prompt=RESEARCH_SYSTEM_PROMPT,
+        max_steps=DEFAULT_MAX_STEPS,
+        use_memory=False,
+    ),
+)
+workflow.add_node(
+    "DBAgent",
+    partial(
+        worker_node,
+        agent_name="db",
+        system_prompt=DB_SYSTEM_PROMPT,
+        max_steps=DEFAULT_MAX_STEPS,
+        use_memory=False,
+    ),
+)
 
-# All workers report back to the Commenter Supervisor
-workflow.add_edge("CodexEngine",   "Supervisor")
+workflow.add_edge("CodexEngine", "Supervisor")
 workflow.add_edge("ResearchAgent", "Supervisor")
-workflow.add_edge("DBAgent",       "Supervisor")
+workflow.add_edge("DBAgent", "Supervisor")
 
 workflow.add_conditional_edges(
     "Supervisor",
     lambda x: x["next"],
     {
-        "CodexEngine":   "CodexEngine",
+        "CodexEngine": "CodexEngine",
         "ResearchAgent": "ResearchAgent",
-        "DBAgent":       "DBAgent",
-        "FINISH":        END,
+        "DBAgent": "DBAgent",
+        "FINISH": END,
     },
 )
 workflow.set_entry_point("Supervisor")
 
-# Export uncompiled — main.py attaches the MemorySaver checkpointer
 graph = workflow
 
 __all__ = ["graph", "AgentState"]

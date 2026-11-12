@@ -11,31 +11,34 @@ DBAgent       → save_code_snippet, get_snippets, log_improvement
 import ast
 import asyncio
 import difflib
-import json
 import logging
 import os
 import pathlib
 import re
-import subprocess
 from typing import Optional
 
 import requests
-
-log = logging.getLogger("agentos.tools")
 from bs4 import BeautifulSoup
-from duckduckgo_search import DDGS
-from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import tool
 from langchain_experimental.utilities import PythonREPL
 from sqlalchemy import select
 
-from database import AsyncSessionLocal, CodeSnippet, Improvement
+try:
+    from duckduckgo_search import DDGS
+except ImportError:
+    DDGS = None
+
+from database import AsyncSessionLocal, CodeSnippet, Improvement, get_or_create_local_dev_user
+
+log = logging.getLogger("agentos.tools")
 
 repl = PythonREPL()
 
 # ── Path safety ─────────────────────────────────────────────────────────────────
 # Resolve paths relative to CWD; block traversal outside the project root.
 _PROJECT_ROOT = pathlib.Path(os.getcwd()).resolve()
+
 
 def _safe_resolve(path: str) -> pathlib.Path:
     """Resolve `path` relative to the project root, rejecting escape attempts."""
@@ -150,9 +153,11 @@ async def list_directory(path: str = ".") -> str:
                 entries.append(f"  📁 {item.name}/  ({n} files)")
             else:
                 sz = item.stat().st_size
-                sz_str = (f"{sz} B" if sz < 1024
-                          else f"{sz/1024:.1f} KB" if sz < 1024**2
-                          else f"{sz/1024**2:.1f} MB")
+                sz_str = (
+                    f"{sz} B" if sz < 1024
+                    else f"{sz/1024:.1f} KB" if sz < 1024**2
+                    else f"{sz/1024**2:.1f} MB"
+                )
                 entries.append(f"  📄 {item.name}  ({sz_str})")
         return (
             f"Directory: {resolved}\n{'─'*60}\n" + "\n".join(entries)
@@ -200,16 +205,14 @@ async def patch_file(path: str, old_lines: str, new_lines: str) -> str:
 
         original = await asyncio.to_thread(resolved.read_text, encoding="utf-8")
 
-        # Normalise: strip trailing whitespace per line for matching
         def _norm(text: str) -> str:
             return "\n".join(line.rstrip() for line in text.splitlines())
 
         norm_original = _norm(original)
-        norm_old      = _norm(old_lines)
+        norm_old = _norm(old_lines)
 
         occurrences = norm_original.count(norm_old)
         if occurrences == 0:
-            # Build a helpful near-miss hint
             old_first = old_lines.splitlines()[0].strip() if old_lines.strip() else ""
             hint = ""
             if old_first:
@@ -227,23 +230,24 @@ async def patch_file(path: str, old_lines: str, new_lines: str) -> str:
                 f"{resolved.name} — make old_lines longer/more specific to be unambiguous."
             )
 
-        # Apply the patch on the normalised content, then reattach original line endings
         updated_norm = norm_original.replace(norm_old, _norm(new_lines), 1)
-
-        # Restore the file's original line ending style
         eol = "\r\n" if "\r\n" in original else "\n"
         updated = updated_norm.replace("\n", eol)
 
         await asyncio.to_thread(resolved.write_text, updated, encoding="utf-8")
 
-        # Show a compact diff for confirmation
-        diff = list(difflib.unified_diff(
-            original.splitlines(), updated.splitlines(),
-            fromfile=f"a/{resolved.name}", tofile=f"b/{resolved.name}", lineterm=""
-        ))
+        diff = list(
+            difflib.unified_diff(
+                original.splitlines(),
+                updated.splitlines(),
+                fromfile=f"a/{resolved.name}",
+                tofile=f"b/{resolved.name}",
+                lineterm="",
+            )
+        )
         diff_str = "\n".join(diff[:60]) + ("\n... (diff truncated)" if len(diff) > 60 else "")
         removed = len(old_lines.splitlines())
-        added   = len(new_lines.splitlines())
+        added = len(new_lines.splitlines())
         return (
             f"Patched {resolved.name}: -{removed} lines / +{added} lines\n"
             f"{'─'*60}\n{diff_str}"
@@ -268,11 +272,10 @@ async def search_codebase(pattern: str, path: str = ".", file_glob: str = "*.py"
     """
     try:
         resolved = _safe_resolve(path)
-        regex    = re.compile(pattern, re.IGNORECASE)
-        matches  = []
+        regex = re.compile(pattern, re.IGNORECASE)
+        matches = []
 
         for file in sorted(resolved.rglob(file_glob)):
-            # Skip noise
             if any(p in file.parts for p in (".git", "__pycache__", ".venv", "node_modules")):
                 continue
             try:
@@ -282,7 +285,7 @@ async def search_codebase(pattern: str, path: str = ".", file_glob: str = "*.py"
             for i, line in enumerate(lines, 1):
                 if regex.search(line):
                     context_start = max(0, i - 3)
-                    context_end   = min(len(lines), i + 2)
+                    context_end = min(len(lines), i + 2)
                     ctx = "\n".join(
                         f"  {'>>>' if j + 1 == i else '   '} {j+1:4d} | {lines[j]}"
                         for j in range(context_start, context_end)
@@ -337,18 +340,16 @@ async def run_tests(
         err = stderr.decode(errors="replace")
         full = (out + "\n" + err).strip()
 
-        # Parse summary line: "5 passed, 2 failed, 1 error in 3.14s"
         n_passed = int(re.search(r"(\d+) passed", full).group(1)) if re.search(r"(\d+) passed", full) else 0
         failed_m = re.findall(r"(\d+) failed", full)
-        error_m  = re.findall(r"(\d+) error", full)
+        error_m = re.findall(r"(\d+) error", full)
         n_failed = int(failed_m[0]) if failed_m else 0
-        n_error  = int(error_m[0])  if error_m  else 0
+        n_error = int(error_m[0]) if error_m else 0
 
         all_green = proc.returncode == 0
 
-        # Extract individual FAILED blocks
         failed_blocks = re.findall(r"(FAILED .+?)(?=\nFAILED |\nPASSED |\n=|\Z)", full, re.DOTALL)
-        short_errors  = re.findall(r"(_{5,}.+?)(?=_{5,}|\Z)", full, re.DOTALL)
+        short_errors = re.findall(r"(_{5,}.+?)(?=_{5,}|\Z)", full, re.DOTALL)
 
         status_icon = "✅" if all_green else "❌"
         header = (
@@ -371,7 +372,6 @@ async def run_tests(
         else:
             sections.append("All tests passing — no action required.")
 
-        # Always include raw tail for context
         tail = "\n".join(full.splitlines()[-30:])
         sections.append(f"RAW OUTPUT (last 30 lines):\n{tail}")
 
@@ -392,11 +392,10 @@ async def index_repo(path: str = ".") -> str:
     Results are concise enough to fit in context; re-run if files have changed."""
     try:
         resolved = _safe_resolve(path)
-        output   = []
+        output = []
 
-        # ── File tree ────────────────────────────────────────────────────────
         tree_lines = [f"PROJECT ROOT: {resolved}"]
-        py_files   = []
+        py_files = []
         for file in sorted(resolved.rglob("*")):
             if any(p in file.parts for p in (".git", "__pycache__", ".venv", "node_modules")):
                 continue
@@ -411,19 +410,18 @@ async def index_repo(path: str = ".") -> str:
                 tree_lines.append(f"{indent}📄 {file.name} ({sz_str})")
                 if file.suffix == ".py":
                     py_files.append(file)
-        output.append("FILE TREE\n" + "─"*40 + "\n" + "\n".join(tree_lines))
+        output.append("FILE TREE\n" + "─" * 40 + "\n" + "\n".join(tree_lines))
 
-        # ── Python symbol index ──────────────────────────────────────────────
         symbol_lines = []
-        todos        = []
-        imports_map  = {}
+        todos = []
+        imports_map = {}
 
         for pyfile in py_files:
             rel = pyfile.relative_to(resolved)
             try:
-                src   = pyfile.read_text(encoding="utf-8", errors="replace")
+                src = pyfile.read_text(encoding="utf-8", errors="replace")
                 lines = src.splitlines()
-                tree  = ast.parse(src)
+                tree = ast.parse(src)
             except Exception:
                 continue
 
@@ -438,7 +436,6 @@ async def index_repo(path: str = ".") -> str:
                 elif isinstance(node, ast.ClassDef):
                     file_symbols.append(f"  class {node.name}  [line {node.lineno}]")
 
-            # Imports
             file_imports = []
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
@@ -448,7 +445,6 @@ async def index_repo(path: str = ".") -> str:
             if file_imports:
                 imports_map[str(rel)] = list(dict.fromkeys(file_imports))
 
-            # TODOs
             for i, line in enumerate(lines, 1):
                 if re.search(r"TODO|FIXME|HACK|XXX|BUG", line, re.IGNORECASE):
                     todos.append(f"  {rel}:{i}  {line.strip()}")
@@ -457,16 +453,16 @@ async def index_repo(path: str = ".") -> str:
                 symbol_lines.append(f"\n{rel}:")
                 symbol_lines.extend(file_symbols)
 
-        output.append("PYTHON SYMBOLS\n" + "─"*40 + "\n".join(symbol_lines))
+        output.append("PYTHON SYMBOLS\n" + "─" * 40 + "\n".join(symbol_lines))
 
         if imports_map:
             imp_str = "\n".join(f"  {f}: {', '.join(v[:6])}" for f, v in list(imports_map.items())[:15])
-            output.append("IMPORT MAP (top 15 files)\n" + "─"*40 + "\n" + imp_str)
+            output.append("IMPORT MAP (top 15 files)\n" + "─" * 40 + "\n" + imp_str)
 
         if todos:
-            output.append("TODOs / FIXMEs\n" + "─"*40 + "\n" + "\n".join(todos[:20]))
+            output.append("TODOs / FIXMEs\n" + "─" * 40 + "\n" + "\n".join(todos[:20]))
         else:
-            output.append("TODOs / FIXMEs\n" + "─"*40 + "\nNone found.")
+            output.append("TODOs / FIXMEs\n" + "─" * 40 + "\nNone found.")
 
         return "\n\n".join(output)
 
@@ -515,25 +511,38 @@ async def run_shell_command(command: str, timeout_seconds: int = 60) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+async def _execute_ddgs_query(
+    query: str,
+    max_results: int = 5,
+    empty_label: Optional[str] = None,
+    error_prefix: str = "Search error",
+) -> str:
+    """Shared DuckDuckGo text search and markdown formatter for ResearchAgent tools."""
+    if DDGS is None:
+        return f"{error_prefix}: duckduckgo-search package is not installed."
+    try:
+        def _search() -> list[dict]:
+            with DDGS() as ddgs:
+                return list(ddgs.text(query, max_results=max_results))
+
+        results = await asyncio.to_thread(_search)
+        if not results:
+            return f"No results for: '{empty_label or query}'"
+        blocks = [
+            f"**{r.get('title', 'Untitled')}**\nURL: {r.get('href', '')}\n{r.get('body', '').strip()}"
+            for r in results
+        ]
+        return "\n\n---\n\n".join(blocks)
+    except Exception as e:
+        return f"{error_prefix}: {repr(e)}"
+
+
 @tool
 async def web_search(query: str, max_results: int = 5) -> str:
     """Search the web for developer resources: Stack Overflow answers, GitHub repos,
     official docs, tutorials, and error explanations.
     Use specific technical queries (e.g. 'Python asyncio deadlock fix site:stackoverflow.com')."""
-    try:
-        def _search() -> list[dict]:
-            with DDGS() as ddgs:
-                return list(ddgs.text(query, max_results=max_results))
-        results = await asyncio.to_thread(_search)
-        if not results:
-            return f"No results for: '{query}'"
-        blocks = [
-            f"**{r.get('title','Untitled')}**\nURL: {r.get('href','')}\n{r.get('body','').strip()}"
-            for r in results
-        ]
-        return "\n\n---\n\n".join(blocks)
-    except Exception as e:
-        return f"Search error: {repr(e)}"
+    return await _execute_ddgs_query(query, max_results=max_results, error_prefix="Search error")
 
 
 @tool
@@ -550,6 +559,7 @@ async def scrape_page(url: str) -> str:
                 tag.decompose()
             lines = [l.strip() for l in soup.get_text(separator="\n").splitlines() if l.strip()]
             return "\n".join(lines[:200])
+
         return await asyncio.to_thread(_scrape)
     except Exception as e:
         return f"Failed to scrape {url}: {repr(e)}"
@@ -559,21 +569,13 @@ async def scrape_page(url: str) -> str:
 async def search_algorithms(topic: str) -> str:
     """Search for algorithm implementations with time/space complexity analysis.
     Best for: sorting, graph traversal, dynamic programming, data structures, ML algorithms."""
-    try:
-        def _search() -> list[dict]:
-            q = f"{topic} algorithm implementation time complexity Python"
-            with DDGS() as ddgs:
-                return list(ddgs.text(q, max_results=5))
-        results = await asyncio.to_thread(_search)
-        if not results:
-            return f"No results for: '{topic}'"
-        blocks = [
-            f"**{r.get('title','Untitled')}**\nURL: {r.get('href','')}\n{r.get('body','').strip()}"
-            for r in results
-        ]
-        return "\n\n---\n\n".join(blocks)
-    except Exception as e:
-        return f"Algorithm search error: {repr(e)}"
+    q = f"{topic} algorithm implementation time complexity Python"
+    return await _execute_ddgs_query(
+        q,
+        max_results=5,
+        empty_label=topic,
+        error_prefix="Algorithm search error",
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -582,38 +584,23 @@ async def search_algorithms(topic: str) -> str:
 
 
 async def _get_user_id(config: Optional[RunnableConfig]) -> int:
-    """Helper to extract active user_id from config, falling back to local dev user."""
+    """Extract active `user_id` from RunnableConfig, falling back to `local_dev_user`."""
     user_id = None
     if config and isinstance(config, dict) and "configurable" in config:
         user_id = config["configurable"].get("user_id")
     elif config and hasattr(config, "configurable") and config.configurable:
         user_id = config.configurable.get("user_id")
-        
+
     if user_id:
         return int(user_id)
-        
-    # Lazy creation of local_dev_user for offline development
-    from database import User
-    import hashlib
-    import os
-    async with AsyncSessionLocal() as db:
-        try:
-            stmt = select(User).where(User.username == "local_dev_user")
-            result = await db.execute(stmt)
-            user = result.scalar_one_or_none()
-            if not user:
-                salt = os.urandom(16)
-                key = hashlib.pbkdf2_hmac('sha256', b"local_dev_password", salt, 100000)
-                hashed = salt.hex() + "$" + key.hex()
-                user = User(username="local_dev_user", hashed_password=hashed)
-                db.add(user)
-                await db.commit()
-                await db.refresh(user)
-            return user.id
-        except Exception as e:
-            log.error("Failed to fetch/create local_dev_user: %s", e)
-            # Wrote a fallback hardcoded dummy ID if DB is not ready
-            return 1
+
+    try:
+        user = await get_or_create_local_dev_user()
+        return user.id
+    except Exception as e:
+        log.error("Failed to fetch/create local_dev_user: %s", e)
+        return 1
+
 
 @tool
 async def save_code_snippet(
@@ -629,7 +616,16 @@ async def save_code_snippet(
     user_id = await _get_user_id(config)
     async with AsyncSessionLocal() as db:
         try:
-            db.add(CodeSnippet(user_id=user_id, title=title, code=code, language=language, tags=tags, notes=notes))
+            db.add(
+                CodeSnippet(
+                    user_id=user_id,
+                    title=title,
+                    code=code,
+                    language=language,
+                    tags=tags,
+                    notes=notes,
+                )
+            )
             await db.commit()
             return f"Saved snippet: '{title}' [{language}]" + (f" | Tags: {tags}" if tags else "")
         except Exception as e:
@@ -639,7 +635,7 @@ async def save_code_snippet(
 
 @tool
 async def get_snippets(
-    query: Optional[str] = None, 
+    query: Optional[str] = None,
     language: Optional[str] = None,
     config: Optional[RunnableConfig] = None,
 ) -> str:
@@ -647,15 +643,17 @@ async def get_snippets(
     user_id = await _get_user_id(config)
     async with AsyncSessionLocal() as db:
         try:
-            result   = await db.execute(
+            result = await db.execute(
                 select(CodeSnippet)
                 .where(CodeSnippet.user_id == user_id)
                 .order_by(CodeSnippet.created_at.desc())
             )
             snippets = result.scalars().all()
             if query:
-                q        = query.lower()
-                snippets = [s for s in snippets if q in s.title.lower() or (s.tags and q in s.tags.lower())]
+                q = query.lower()
+                snippets = [
+                    s for s in snippets if q in s.title.lower() or (s.tags and q in s.tags.lower())
+                ]
             if language:
                 snippets = [s for s in snippets if s.language.lower() == language.lower()]
             if not snippets:
@@ -663,7 +661,9 @@ async def get_snippets(
             blocks = []
             for s in snippets[:5]:
                 preview = s.code[:500] + ("..." if len(s.code) > 500 else "")
-                blocks.append(f"### {s.title} [{s.language}]\nTags: {s.tags or 'none'}\n```{s.language}\n{preview}\n```")
+                blocks.append(
+                    f"### {s.title} [{s.language}]\nTags: {s.tags or 'none'}\n```{s.language}\n{preview}\n```"
+                )
             return "\n\n---\n\n".join(blocks)
         except Exception as e:
             return f"DB Error: {e}"
@@ -671,8 +671,8 @@ async def get_snippets(
 
 @tool
 async def log_improvement(
-    description: str, 
-    category: str = "general", 
+    description: str,
+    category: str = "general",
     impact: str = "medium",
     config: Optional[RunnableConfig] = None,
 ) -> str:
@@ -682,7 +682,14 @@ async def log_improvement(
     user_id = await _get_user_id(config)
     async with AsyncSessionLocal() as db:
         try:
-            db.add(Improvement(user_id=user_id, description=description, category=category, impact=impact))
+            db.add(
+                Improvement(
+                    user_id=user_id,
+                    description=description,
+                    category=category,
+                    impact=impact,
+                )
+            )
             await db.commit()
             return f"Logged [{category} | {impact}]: {description}"
         except Exception as e:

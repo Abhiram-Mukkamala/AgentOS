@@ -8,18 +8,32 @@ let serverTerminal = null;
 function activate(context) {
     console.log('AgentOS Extension Activated');
 
-    const config = vscode.workspace.getConfiguration('agentos');
-    const port = config.get('backendPort') || 8080;
-    const autoStart = config.get('autoStartBackend');
+    const getPort = () => vscode.workspace.getConfiguration('agentos').get('backendPort') || 8080;
+    const autoStart = vscode.workspace.getConfiguration('agentos').get('autoStartBackend');
 
     if (autoStart) {
-        startBackend(port);
+        startBackend(getPort());
     }
+
+    // Register Webview View Provider
+    const provider = new AgentOSChatProvider(context.extensionUri, getPort());
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider('agentos.chatView', provider)
+    );
+
+    // Dynamically update backendPort when VS Code settings change
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration((event) => {
+            if (event.affectsConfiguration('agentos.backendPort')) {
+                provider.updatePort(getPort());
+            }
+        })
+    );
 
     // Register Commands
     context.subscriptions.push(
         vscode.commands.registerCommand('agentos.startServer', () => {
-            startBackend(port);
+            startBackend(getPort());
         })
     );
 
@@ -39,12 +53,6 @@ function activate(context) {
         vscode.commands.registerCommand('agentos.focus', () => {
             vscode.commands.executeCommand('agentos.chatView.focus');
         })
-    );
-
-    // Register Webview View Provider
-    const provider = new AgentOSChatProvider(context.extensionUri, port);
-    context.subscriptions.push(
-        vscode.window.registerWebviewViewProvider('agentos.chatView', provider)
     );
 }
 
@@ -68,7 +76,6 @@ function startBackend(port) {
 
     vscode.window.showInformationMessage(`Starting AgentOS backend on port ${port}...`);
 
-    // Spawn a terminal for the server
     serverTerminal = vscode.window.createTerminal({
         name: 'AgentOS Backend',
         cwd: serverCwd,
@@ -76,8 +83,7 @@ function startBackend(port) {
             PORT: port.toString()
         }
     });
-    
-    // Start server
+
     serverTerminal.sendText('python main.py');
     serverTerminal.show();
 }
@@ -96,9 +102,21 @@ class AgentOSChatProvider {
     constructor(extensionUri, port) {
         this._extensionUri = extensionUri;
         this._port = port;
+        this._webviewView = null;
+    }
+
+    updatePort(newPort) {
+        this._port = newPort;
+        if (this._webviewView) {
+            this._webviewView.webview.postMessage({
+                type: 'portUpdated',
+                port: this._port
+            });
+        }
     }
 
     resolveWebviewView(webviewView, context, _token) {
+        this._webviewView = webviewView;
         webviewView.webview.options = {
             enableScripts: true,
             localResourceRoots: [this._extensionUri]
@@ -114,15 +132,15 @@ class AgentOSChatProvider {
                             prompt: data.value,
                             thread_id: data.threadId || undefined
                         });
-                        webviewView.webview.postMessage({ 
-                            type: 'addResponse', 
+                        webviewView.webview.postMessage({
+                            type: 'addResponse',
                             value: response.response,
                             threadId: response.thread_id
                         });
                     } catch (err) {
-                        webviewView.webview.postMessage({ 
-                            type: 'addError', 
-                            value: `Failed to connect to AgentOS backend: ${err.message}` 
+                        webviewView.webview.postMessage({
+                            type: 'addError',
+                            value: `Failed to connect to AgentOS backend (127.0.0.1:${this._port}): ${err.message}`
                         });
                     }
                     break;
@@ -152,15 +170,6 @@ class AgentOSChatProvider {
                     break;
                 }
                 case 'createFile': {
-                    const extMap = {
-                        python: 'py', javascript: 'js', typescript: 'ts', html: 'html',
-                        css: 'css', json: 'json', markdown: 'md', sql: 'sql',
-                        shell: 'sh', bash: 'sh', yaml: 'yml', cpp: 'cpp', c: 'c',
-                        rust: 'rs', go: 'go', ruby: 'rb', php: 'php'
-                    };
-                    const lang = (data.language || '').toLowerCase();
-                    const ext = extMap[lang] || 'txt';
-                    
                     try {
                         const doc = await vscode.workspace.openTextDocument({
                             content: data.value,
@@ -195,7 +204,7 @@ class AgentOSChatProvider {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Content-Length': data.length
+                    'Content-Length': Buffer.byteLength(data)
                 }
             };
 
@@ -232,9 +241,8 @@ class AgentOSChatProvider {
             console.warn("Invalid path specified!");
         }
         let html = fs.readFileSync(htmlPath, 'utf8');
-        
-        // Replace port placeholder if needed
-        html = html.replace(/{{PORT}}/g, this._port);
+
+        html = html.replace(/{{PORT}}/g, String(this._port));
         return html;
     }
 }

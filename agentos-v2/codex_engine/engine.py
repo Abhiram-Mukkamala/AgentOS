@@ -2,16 +2,15 @@
 engine.py — AgentOS Codex inference engine.
 
 Wraps llama-cpp-python with auto-configuration from hardware detection.
-Handles model downloading, loading, and OpenAI-compatible chat completions
-with tool-calling support.
+Handles model downloading, loading, idle-unload, and OpenAI-compatible chat
+completions with tool-calling support.
 """
 
-import json
 import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from codex_engine.hardware import HardwareProfile, detect_hardware
 
@@ -94,8 +93,8 @@ def _find_local_model(profile: HardwareProfile, model_path: str = None) -> str:
     # 4. Auto-download from HuggingFace
     if not profile.recommended_repo or not profile.recommended_file:
         raise RuntimeError(
-            "No model available and hardware is too limited for any local model. "
-            "Use cloud mode instead (LOCAL_CODEX=false)."
+            "No local model available and hardware is too limited for auto-download. "
+            "Configure cloud API keys in Settings or set LOCAL_CODEX=false in .env."
         )
 
     return _download_model(profile.recommended_repo, profile.recommended_file)
@@ -113,16 +112,6 @@ class CodexEngine:
     Auto-detects hardware, downloads the optimal model, configures
     context/threads/layers, and provides OpenAI-compatible chat completions
     with tool-calling support.
-
-    Usage:
-        engine = CodexEngine()              # auto-detect everything
-        engine = CodexEngine(model_path="path/to/model.gguf")  # explicit model
-        engine = CodexEngine(force_size="14b")  # force a specific tier
-
-        response = engine.chat_completion(
-            messages=[{"role": "user", "content": "Fix this bug"}],
-            tools=[...],
-        )
     """
 
     def __init__(
@@ -133,6 +122,8 @@ class CodexEngine:
         n_threads: int = None,
     ):
         self._start_time = time.time()
+        self._last_used_time = time.time()
+        self._idle_unload_seconds = int(os.getenv("LOCAL_CODEX_IDLE_UNLOAD_SECONDS", "1800"))
         self._total_tokens = 0
         self._total_requests = 0
         self._model = None
@@ -197,6 +188,7 @@ class CodexEngine:
             verbose=False,
         )
 
+        self._last_used_time = time.time()
         load_time = time.time() - load_start
         log.info("Model loaded in %.1f seconds.", load_time)
 
@@ -214,24 +206,17 @@ class CodexEngine:
         """
         OpenAI-compatible chat completion.
 
-        Args:
-            messages: List of {"role": ..., "content": ...} dicts.
-            tools:    OpenAI-format tool definitions.
-            tool_choice: "auto", "none", or {"type": "function", "function": {"name": "..."}}
-            temperature: Sampling temperature.
-            max_tokens: Max tokens to generate.
-
-        Returns:
-            OpenAI-compatible response dict with choices[0].message.
+        Auto-reloads the model if it was previously unloaded via idle timeout or /unload.
         """
         if self._model is None:
-            raise RuntimeError("Model not loaded. Call engine._load_model() first.")
+            log.info("Model was unloaded; reloading on demand...")
+            self._load_model()
 
+        self._last_used_time = time.time()
         self._total_requests += 1
         start = time.time()
 
         try:
-            # Build kwargs for llama-cpp-python
             completion_kwargs: dict[str, Any] = {
                 "messages": messages,
                 "temperature": temperature,
@@ -244,7 +229,6 @@ class CodexEngine:
 
             response = self._model.create_chat_completion(**completion_kwargs)
 
-            # Track tokens
             usage = response.get("usage", {})
             self._total_tokens += usage.get("total_tokens", 0)
 
@@ -257,6 +241,7 @@ class CodexEngine:
                 gen_tokens, elapsed, tok_per_sec,
             )
 
+            self._last_used_time = time.time()
             return response
 
         except Exception as e:
@@ -269,7 +254,6 @@ class CodexEngine:
         """Engine health and status report."""
         uptime = time.time() - self._start_time
 
-        # Current memory usage
         ram_info = {}
         try:
             import psutil
@@ -284,13 +268,14 @@ class CodexEngine:
             pass
 
         return {
-            "status": "ok" if self._model is not None else "no_model",
+            "status": "ok" if self._model is not None else "unloaded",
             "model": self.profile.recommended_model,
             "model_path": self._model_path if self._model else None,
             "context_window": self.profile.n_ctx,
             "gpu": self.profile.gpu_name,
             "ssd_overflow": self.profile.ssd_overflow_active,
             "uptime_seconds": round(uptime, 1),
+            "idle_seconds": round(time.time() - self._last_used_time, 1),
             "total_requests": self._total_requests,
             "total_tokens": self._total_tokens,
             "hardware": {
@@ -302,6 +287,21 @@ class CodexEngine:
         }
 
     # ── Cleanup ─────────────────────────────────────────────────────────────
+
+    def check_idle_unload(self) -> bool:
+        """Unload model if idle longer than LOCAL_CODEX_IDLE_UNLOAD_SECONDS."""
+        if (
+            self._model is not None
+            and self._idle_unload_seconds > 0
+            and (time.time() - self._last_used_time) > self._idle_unload_seconds
+        ):
+            log.info(
+                "Model idle for >%ds; unloading to reclaim VRAM/RAM.",
+                self._idle_unload_seconds,
+            )
+            self.unload()
+            return True
+        return False
 
     def unload(self):
         """Unload the model and free memory."""

@@ -6,7 +6,6 @@ on:
   pull_request:
     branches: [main]
 
-# Only one deploy per branch at a time — cancel previous runs on new push
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -14,7 +13,7 @@ concurrency:
 jobs:
   # ── 1. Test ─────────────────────────────────────────────────────────────────
   test:
-    name: Import & smoke tests
+    name: Import & unit tests
     runs-on: ubuntu-latest
 
     steps:
@@ -27,7 +26,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt pytest
 
       - name: Verify core imports
         env:
@@ -35,10 +34,10 @@ jobs:
           DATABASE_URL: sqlite+aiosqlite:///./test.db
         run: |
           python -c "
-          from database import Base, CodeSnippet, Improvement, Task
+          from database import Base, CodeSnippet, Improvement, User
           from tools import (
               execute_code, analyze_code, read_file, write_file,
-              edit_file, list_directory, run_shell_command,
+              patch_file, list_directory, run_shell_command,
               web_search, scrape_page, search_algorithms,
               save_code_snippet, get_snippets, log_improvement,
           )
@@ -53,17 +52,16 @@ jobs:
           DATABASE_URL: sqlite+aiosqlite:///./test.db
         run: |
           python -c "
-          import os, operator
           from langgraph.checkpoint.memory import MemorySaver
           from agent import graph
           app = graph.compile(checkpointer=MemorySaver())
           print('Graph compiled OK:', app)
           "
 
-      - name: Run test suite (if server is available)
-        # The test_agentos.py script hits a live server; skip in CI unless you
-        # start the server in a background step. We just syntax-check it here.
-        run: python -m py_compile test_agentos.py && echo "test_agentos.py syntax OK"
+      - name: Run integration test suite
+        env:
+          DATABASE_URL: sqlite+aiosqlite:///./test.db
+        run: pytest -q test_auth_settings.py
 
   # ── 2. Docker build check ───────────────────────────────────────────────────
   docker:
@@ -113,7 +111,6 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          # Get the public URL from Railway and hit /health
           DEPLOY_URL=$(railway status --json | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('url',''))" 2>/dev/null || echo "")
           if [ -n "$DEPLOY_URL" ]; then
             echo "Checking $DEPLOY_URL/health ..."

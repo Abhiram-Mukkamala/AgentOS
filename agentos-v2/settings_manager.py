@@ -3,11 +3,15 @@ settings_manager.py — Manages token estimation and database-backed configurati
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict
+
+from sqlalchemy import case, select, update
+
+from database import AsyncSessionLocal, User
 
 log = logging.getLogger("agentos.settings")
 
-DEFAULT_SETTINGS = {
+DEFAULT_SETTINGS: Dict[str, Any] = {
     "active_mode": "free",
     "selected_providers": ["openai", "gemini", "anthropic"],
     "openai_api_key": "",
@@ -16,12 +20,14 @@ DEFAULT_SETTINGS = {
     "token_budget": 100000,
     "token_used": 0,
     "token_warning_threshold": 0.90,
-    "token_warning_sent": False,
     "token_auto_fallback": True,
     "local_max_context_tokens": 2048,
     "local_auto_delete": True,
-    "language": "en"
+    "language": "en",
+    "warning_reached": False,
+    "budget_exhausted": False,
 }
+
 
 def estimate_tokens(text: str) -> int:
     """
@@ -34,46 +40,53 @@ def estimate_tokens(text: str) -> int:
     chars = len(text)
     if words == 0:
         return chars // 4
-    # 1.35 tokens per word is a very reliable average for normal dev context.
+    # 1.35 tokens per word is a reliable average for normal dev context.
     return int(words * 1.35)
+
+
+def _serialize_user_settings(user: User) -> Dict[str, Any]:
+    """Convert a User ORM instance into the settings dictionary contract."""
+    providers = (
+        [p.strip() for p in user.selected_providers.split(",") if p.strip()]
+        if user.selected_providers
+        else []
+    )
+    budget = user.token_budget or 0
+    used = user.token_used or 0
+    return {
+        "active_mode": user.active_mode,
+        "selected_providers": providers,
+        "openai_api_key": user.openai_api_key or "",
+        "anthropic_api_key": user.anthropic_api_key or "",
+        "gemini_api_key": user.gemini_api_key or "",
+        "token_budget": budget,
+        "token_used": used,
+        "token_warning_threshold": user.token_warning_threshold,
+        "token_auto_fallback": user.token_auto_fallback,
+        "local_max_context_tokens": user.local_max_context_tokens,
+        "local_auto_delete": user.local_auto_delete,
+        "language": user.language or "en",
+        "warning_reached": budget > 0 and (used / budget) >= user.token_warning_threshold,
+        "budget_exhausted": budget > 0 and used >= budget,
+    }
+
 
 async def get_user_settings(user_id: int) -> Dict[str, Any]:
     """Retrieve user settings dictionary from the database."""
-    from database import AsyncSessionLocal, User
-    from sqlalchemy import select
-
     async with AsyncSessionLocal() as session:
         try:
             result = await session.execute(select(User).where(User.id == user_id))
             user = result.scalar_one_or_none()
             if not user:
                 return DEFAULT_SETTINGS.copy()
-            
-            providers = [p.strip() for p in user.selected_providers.split(",")] if user.selected_providers else []
-            return {
-                "active_mode": user.active_mode,
-                "selected_providers": providers,
-                "openai_api_key": user.openai_api_key or "",
-                "anthropic_api_key": user.anthropic_api_key or "",
-                "gemini_api_key": user.gemini_api_key or "",
-                "token_budget": user.token_budget,
-                "token_used": user.token_used,
-                "token_warning_threshold": user.token_warning_threshold,
-                "token_warning_sent": user.token_warning_sent,
-                "token_auto_fallback": user.token_auto_fallback,
-                "local_max_context_tokens": user.local_max_context_tokens,
-                "local_auto_delete": user.local_auto_delete,
-                "language": user.language or "en",
-            }
+            return _serialize_user_settings(user)
         except Exception as e:
             log.error("Failed to fetch settings for user %s: %s", user_id, e)
             return DEFAULT_SETTINGS.copy()
 
+
 async def update_user_settings(user_id: int, settings: Dict[str, Any]) -> Dict[str, Any]:
     """Update user settings in database and return the merged settings."""
-    from database import AsyncSessionLocal, User
-    from sqlalchemy import select
-
     async with AsyncSessionLocal() as session:
         try:
             result = await session.execute(select(User).where(User.id == user_id))
@@ -97,8 +110,6 @@ async def update_user_settings(user_id: int, settings: Dict[str, Any]) -> Dict[s
                 user.token_used = int(settings["token_used"])
             if "token_warning_threshold" in settings:
                 user.token_warning_threshold = float(settings["token_warning_threshold"])
-            if "token_warning_sent" in settings:
-                user.token_warning_sent = bool(settings["token_warning_sent"])
             if "token_auto_fallback" in settings:
                 user.token_auto_fallback = bool(settings["token_auto_fallback"])
             if "local_max_context_tokens" in settings:
@@ -109,24 +120,51 @@ async def update_user_settings(user_id: int, settings: Dict[str, Any]) -> Dict[s
                 user.language = str(settings["language"])
 
             await session.commit()
-            return await get_user_settings(user_id)
+            await session.refresh(user)
+            return _serialize_user_settings(user)
         except Exception as e:
             log.error("Failed to update settings for user %s: %s", user_id, e)
             await session.rollback()
-            raise e
+            raise
 
-async def add_user_tokens(user_id: int, count: int) -> dict:
-    """Add tokens to user's used token tally and check fallback rules."""
-    settings = await get_user_settings(user_id)
-    new_used = settings["token_used"] + count
-    updates = {"token_used": new_used}
-    
-    # Auto fallback check
-    if settings["token_auto_fallback"] and settings["active_mode"] != "local":
-        if new_used >= settings["token_budget"]:
-            updates["active_mode"] = "local"
-            log.info("User %s token budget exhausted (%s/%s). Falling back to local mode.", 
-                     user_id, new_used, settings["token_budget"])
-            
-    await update_user_settings(user_id, updates)
-    return await get_user_settings(user_id)
+
+async def add_user_tokens(user_id: int, count: int) -> Dict[str, Any]:
+    """
+    Atomically increment a user's `token_used` counter and apply auto-fallback
+    to local mode in a single `UPDATE ... RETURNING` query within one DB session.
+    """
+    async with AsyncSessionLocal() as session:
+        try:
+            new_used_expr = User.token_used + int(count)
+            new_mode_expr = case(
+                (
+                    (User.token_auto_fallback.is_(True))
+                    & (User.active_mode != "local")
+                    & (new_used_expr >= User.token_budget),
+                    "local",
+                ),
+                else_=User.active_mode,
+            )
+            stmt = (
+                update(User)
+                .where(User.id == user_id)
+                .values(token_used=new_used_expr, active_mode=new_mode_expr)
+                .returning(User)
+            )
+            result = await session.execute(stmt)
+            user = result.scalar_one_or_none()
+            await session.commit()
+            if not user:
+                return DEFAULT_SETTINGS.copy()
+            if user.active_mode == "local" and user.token_used >= user.token_budget:
+                log.info(
+                    "User %s token budget exhausted (%s/%s). Active mode is local.",
+                    user_id,
+                    user.token_used,
+                    user.token_budget,
+                )
+            return _serialize_user_settings(user)
+        except Exception as e:
+            log.error("Failed atomic token increment for user %s: %s", user_id, e)
+            await session.rollback()
+            return DEFAULT_SETTINGS.copy()

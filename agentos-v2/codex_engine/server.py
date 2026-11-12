@@ -5,17 +5,17 @@ Endpoints:
     POST /v1/chat/completions   → chat with tool calling
     GET  /v1/models             → list loaded model
     GET  /health                → engine health + hardware stats
+    POST /unload                → unload model from VRAM/RAM
 
 Can run:
     - Standalone:  python -m codex_engine.server
-    - Embedded:    start_codex_server(background=True)  (inside main.py)
+    - Embedded:    start_codex_server(background=True)  (inside agent.py)
 """
 
 import logging
 import os
 import threading
 import time
-import uuid
 from typing import Any, Optional
 
 log = logging.getLogger("codex_engine.server")
@@ -47,7 +47,7 @@ def _create_app():
     """Create the FastAPI application."""
     from fastapi import FastAPI, HTTPException
     from fastapi.responses import JSONResponse
-    from pydantic import BaseModel, Field
+    from pydantic import BaseModel
 
     app = FastAPI(
         title="AgentOS Codex Engine",
@@ -56,13 +56,6 @@ def _create_app():
     )
 
     # ── Request / Response models ───────────────────────────────────────────
-
-    class ChatMessage(BaseModel):
-        role: str
-        content: Optional[str] = None
-        tool_calls: Optional[list[dict]] = None
-        tool_call_id: Optional[str] = None
-        name: Optional[str] = None
 
     class ChatCompletionRequest(BaseModel):
         model: str = "local"
@@ -77,15 +70,26 @@ def _create_app():
 
     @app.get("/health")
     async def health():
-        """Engine health check with hardware stats."""
+        """Engine health check with hardware stats and idle-timeout check."""
         try:
             engine = _get_engine()
+            engine.check_idle_unload()
             return engine.health()
         except Exception as e:
             return JSONResponse(
                 status_code=503,
                 content={"status": "error", "detail": str(e)},
             )
+
+    @app.post("/unload")
+    async def unload_model():
+        """Admin endpoint to explicitly unload the GGUF model and reclaim VRAM/RAM."""
+        try:
+            if _engine is not None:
+                _engine.unload()
+            return {"status": "unloaded"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/v1/models")
     async def list_models():
@@ -214,6 +218,7 @@ def start_codex_server(
         print(f"    POST http://{host}:{port}/v1/chat/completions")
         print(f"    GET  http://{host}:{port}/v1/models")
         print(f"    GET  http://{host}:{port}/health")
+        print(f"    POST http://{host}:{port}/unload")
         print()
 
         uvicorn.run(app, host=host, port=port, log_level="info")

@@ -1,48 +1,44 @@
-# 🧠 AgentOS: Contextual Multi-Agent Productivity Hub
+# 🧠 AgentOS v2: Hybrid Edge-to-Kernel Multi-Agent Developer Platform
 
 ![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.110.0-009688.svg)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)
 ![LangGraph](https://img.shields.io/badge/LangGraph-Multi--Agent-orange.svg)
-![Database](https://img.shields.io/badge/Supabase-asyncpg-4CAF50.svg)
-![LLM](https://img.shields.io/badge/Gemini-1.5_Flash-8b5cf6.svg)
+![Database](https://img.shields.io/badge/SQLAlchemy-Async_SQLite_%2F_Postgres-4CAF50.svg)
 
-AgentOS is a stateful, multi-agent orchestrator designed to eliminate the "Parrot Effect" in AI assistants. Instead of returning raw data dumps, specialized agents execute tools and perform a **Synthesis Pass** to provide actionable, context-aware insights.
-
-Built specifically for AI developers managing complex, multi-year AIML roadmaps and high-powered home lab environments.
+AgentOS v2 is a stateful, multi-agent developer productivity platform combining a **Tier-0 Edge Reflex Router** with a **Senior–Junior LangGraph Kernel**, persistent workspace tools, a browser-based Monaco IDE, an analytics dashboard, and a self-contained local GGUF inference engine (**Codex Engine**).
 
 ## 🏗️ Architecture Flow
 
 ```mermaid
 flowchart LR
-    User([User Client]) -->|JSON Payload| API[FastAPI Gateway]
+    User([Web IDE / VS Code]) -->|HTTP + Bearer JWT| API[FastAPI Gateway]
 
-    subgraph Core_Engine [AgentOS Backend - LangGraph]
+    API -->|Tier-0 Check| Edge{Edge Reflex Router}
+    Edge -->|Single-Hop Tool| FastExec[Direct Tool Dispatch]
+    Edge -->|Escalate| Supervisor{Senior Supervisor}
+
+    subgraph Kernel [LangGraph Multi-Agent Kernel]
         direction TB
-        API -->|Thread ID| Supervisor{Generalist Supervisor}
+        Supervisor -->|Route: Code & FS| Codex[Codex Agent]
+        Supervisor -->|Route: Web & Docs| Research[Research Agent]
+        Supervisor -->|Route: Snippets & Logs| DBAgent[DB Agent]
 
-        Supervisor -->|Route: Logic| Codex[Codex Engine]
-        Supervisor -->|Route: Data| Research[Research Agent]
-        Supervisor -->|Route: State| DBAgent[DB Agent]
-
-        Codex -.-> Synthesis[Anti-Parrot Synthesis Loop]
-        Research -.-> Synthesis
-        DBAgent -.-> Synthesis
-
-        Synthesis -.->|Conversational Output| Supervisor
+        Codex --> Supervisor
+        Research --> Supervisor
+        DBAgent --> Supervisor
     end
 
-    subgraph External_Services [External Infrastructure]
+    subgraph Persistence [Storage & Execution]
         direction TB
-        Codex -->|Execute| REPL[Python REPL]
-        Research -->|Fetch| Wiki[Wikipedia API]
-        DBAgent -->|asyncpg| DB[(Supabase PostgreSQL)]
+        Codex -->|Isolated Workspace| FS[File System / Pytest / AST]
+        Research -->|DuckDuckGo + BS4| Web[Web Search & Scraper]
+        DBAgent -->|SQLAlchemy Async| DB[(SQLite / PostgreSQL)]
     end
+```
 
-    Supervisor ===|Reasoning| Gemini((Gemini 1.5 Flash))
-    Synthesis ===|Formatting| Gemini
+## ✨ Key Capabilities
 
-    style Supervisor fill:#d97706,stroke:#b45309,color:#fff
-    style Synthesis fill:#059669,stroke:#047857,color:#fff
-    style Gemini fill:#2563eb,stroke:#1d4ed8,color:#fff
-    style Core_Engine fill:#1e293b,stroke:#475569,color:#e2e8f0
-    style DB fill:#0f766e,stroke:#115e59,color:#fff
+- **Tier-0 Edge Reflex Router (`edge_router.py`)**: Model-agnostic fast path supporting deterministic rules, local embeddings, ONNX token taggers, or micro-LLMs with margin & span-entropy gating before escalating to the LangGraph kernel.
+- **Senior–Junior Model Hierarchy (`agent.py`)**: Configurable cloud providers (`OPENAI_MODEL`, `ANTHROPIC_MODEL`, `GEMINI_MODEL`, `SENIOR_MODEL_PROVIDER`), free web fallback (`g4f`), and local GGUF inference (`codex_engine/`).
+- **Per-User Auth, Token Budgets & Context Pruning (`database.py`, `settings_manager.py`)**: PBKDF2-HMAC-SHA256 authentication, atomic SQL token budget tracking with automatic local fallback, and LangGraph checkpoint pruning.
+- **Self-Contained Local Codex Engine (`codex_engine/`)**: Hardware-aware (`hardware.py`) GGUF model loader with GPU layer offloading, SSD `mmap` overflow, and idle VRAM unloading.

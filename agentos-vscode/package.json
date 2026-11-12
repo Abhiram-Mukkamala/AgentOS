@@ -45,7 +45,7 @@
       },
       {
         "command": "agentos.openSettings",
-        "title": "AgentOS: Configure API Keys"
+        "title": "AgentOS: Configure Backend & Settings"
       },
       {
         "command": "agentos.focus",
